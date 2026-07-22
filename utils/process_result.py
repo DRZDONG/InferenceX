@@ -180,7 +180,12 @@ else:
     pcp_size = int(os.environ.get('PCP_SIZE', '1'))
     if pp <= 0 or dcp_size <= 0 or pcp_size <= 0:
         raise ValueError("PP_SIZE, DCP_SIZE, and PCP_SIZE must be positive integers.")
+    # TODO(tpu): Refactor field names and normalization logic for TPU runner types.
+    # Currently, 1 physical TPU chip contains 2 Tensor Cores, so num_gpus (physical TPU chips)
+    # is set to num_cores // 2 to normalize throughput per physical TPU chip socket.
     num_gpus = tp_size * pp * pcp_size
+    if hw.lower().startswith('tpu'):
+        num_gpus = max(1, num_gpus // 2)
 
     single_node_data = {
         'is_multinode': False,

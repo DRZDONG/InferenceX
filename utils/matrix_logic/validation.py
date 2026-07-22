@@ -175,6 +175,7 @@ class SingleNodeMatrixEntry(BaseModel):
     run_eval: bool = Field(alias=Fields.RUN_EVAL.value)
     eval_only: bool = Field(alias=Fields.EVAL_ONLY.value, default=False)
     router: Optional[ComponentMetadata] = None
+    additional_settings: Optional[List[str]] = Field(default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
 
     @model_validator(mode='after')
     def validate_single_node_topology(self):
@@ -487,6 +488,8 @@ class SingleNodeSearchSpaceEntry(BaseModel):
         default="none", alias=Fields.SPEC_DECODING.value)
     dp_attn: Optional[bool] = Field(
         default=None, alias=Fields.DP_ATTN.value)
+    additional_settings: Optional[List[str]] = Field(
+        default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
     router: Optional[ComponentMetadata] = None
     conc_start: Optional[int] = Field(
         default=None, alias=Fields.CONC_START.value)
