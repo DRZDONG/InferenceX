@@ -997,6 +997,8 @@ def generate_test_config_sweep(args, all_config_data, runner_data=None):
                                 Fields.DISAGG.value: disagg,
                                 Fields.RUN_EVAL.value: False,
                             }
+                            if bmk.get(Fields.ADDITIONAL_SETTINGS.value):
+                                entry[Fields.ADDITIONAL_SETTINGS.value] = bmk.get(Fields.ADDITIONAL_SETTINGS.value)
                             entry.update(component_metadata(bmk, val))
                             matrix_values.append(validate_matrix_entry(entry, is_multinode=False))
 

@@ -1,0 +1,26 @@
+qwen3p5-fp8-tpu7x-vllm:
+  image: us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/vllm-torchtpu/torchtpu-vllm-prod:latest
+  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model-prefix: qwen3p5
+  runner: tpu7x
+  precision: fp8
+  framework: vllm
+  multinode: false
+  scenarios:
+    fixed-seq-len:
+    - isl: 1024
+      osl: 1024
+      search-space:
+      - tp: 8
+        conc-list: [4, 8, 16, 32, 64, 128, 256]
+    - isl: 8192
+      osl: 1024
+      search-space:
+      - tp: 8
+        conc-list: [4, 8, 16, 32, 64]
+      - tp: 1
+        conc-list: [128, 256]
+        additional-settings:
+          - "DP_SCHED_ENABLED=1 "
+          - "DP_SCHED_BUFFER_PREFILL=1"
+          - "DP_SCHED_BUFFER_PREFILL_TIMEOUT_MS=10000"

@@ -1,0 +1,186 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: "$JOB_NAME"
+  namespace: "$NAMESPACE"
+  labels:
+    kueue.x-k8s.io/queue-name: "$KUEUE_NAME"
+spec:
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - sidecar-bench
+  failurePolicy:
+    maxRestarts: 0
+
+  replicatedJobs:
+  - name: vllm-server
+    replicas: 1
+    template:
+      spec:
+        ttlSecondsAfterFinished: 900
+        backoffLimit: 0
+        template:
+          spec:
+            containers:
+            - name: vllm-server
+              image: "$IMAGE"
+              imagePullPolicy: Always
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -x
+                  
+                  export ISL=$ISL
+                  export OSL=$OSL
+                  export MODEL="$MODEL"
+                  export TP=${TP:-8}
+                  export DP=${DP:-1}
+                  export DP_SCHED_ENABLED="${DP_SCHED_ENABLED:-0}"
+                  export DP_SCHED_BUFFER_PREFILL="${DP_SCHED_BUFFER_PREFILL:-0}"
+                  export DP_SCHED_BUFFER_PREFILL_TIMEOUT_MS="${DP_SCHED_BUFFER_PREFILL_TIMEOUT_MS:-10000}"
+                  export CONC=$CONC
+                  export PORT=10000
+                  export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
+                  export ATTENTION_BACKEND=${ATTENTION_BACKEND:-CUSTOM}
+                  export ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}
+                  
+                  # Sourcing the execution script from the ConfigMap mount inside the container
+                  bash /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh --mode server
+              env:
+              - name: GPU_MEM_UTIL
+                value: "$GPU_MEM_UTIL"
+              - name: TPU_PROCESS_PORT
+                value: "8471"
+              resources:
+                limits:
+                  google.com/tpu: "4"
+                  memory: "900Gi"
+                  cpu: "200"
+                requests:
+                  google.com/tpu: "4"
+                  memory: "900Gi"
+                  cpu: "200"
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /tmp/signal
+                name: shared-signal
+              - mountPath: /workspace/weights
+                name: shared-cache-volume
+                subPath: hub
+                readOnly: true
+              - mountPath: /workspace/cache/jax-cache
+                name: shared-cache-volume
+                subPath: jax-cache
+              - mountPath: /root/.cache/huggingface/
+                name: shared-cache-volume
+                subPath: huggingface
+              - mountPath: /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh
+                name: script-volume
+                subPath: qwen3.5_fp8_tpu7.sh
+              - mountPath: /workspace/InferenceX/benchmarks/benchmark_lib.sh
+                name: script-volume
+                subPath: benchmark_lib.sh
+            nodeSelector:
+              cloud.google.com/gke-accelerator-count: "4"
+              cloud.google.com/gke-tpu-accelerator: "tpu7x"
+              cloud.google.com/gke-tpu-topology: "2x2x1"
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/disk-pressure
+              operator: Exists
+              effect: NoSchedule
+            restartPolicy: Never
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - emptyDir: {}
+              name: shared-signal
+            - name: shared-cache-volume
+              persistentVolumeClaim:
+                claimName: vllm-shared-cache-pvc
+            - name: script-volume
+              configMap:
+                name: tpu-benchmark-scripts
+
+  - name: sidecar-bench
+    replicas: 1
+    template:
+      spec:
+        ttlSecondsAfterFinished: 900
+        backoffLimit: 0
+        template:
+          spec:
+            containers:
+            - name: sidecar-bench
+              image: "$IMAGE"
+              imagePullPolicy: Always
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -x
+                  
+                  export ISL=$ISL
+                  export OSL=$OSL
+                  export CONC="$CONC"
+                  export RANDOM_RANGE_RATIO=0.8
+                  export RESULT_FILENAME="qwen3.5_fp8_singlehost_c${CONC}_${ISL}_${OSL}"
+                  export MODEL="$MODEL"
+                  export PORT=10000
+                  
+                  # Execute client benchmark script from the cloned repository inside the container
+                  bash /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh --mode client --host "$JOB_NAME-vllm-server-0-0.$JOB_NAME.$NAMESPACE.svc.cluster.local"
+                  BENCH_EXIT_CODE=$?
+                  
+                  if [ $BENCH_EXIT_CODE -ne 0 ]; then
+                      echo "Error: Benchmark execution failed with exit code $BENCH_EXIT_CODE" >&2
+                      touch /tmp/signal/done
+                      sleep 30
+                      exit $BENCH_EXIT_CODE
+                  fi
+                  
+                  touch /tmp/signal/done
+                  echo "Benchmark complete. Sleeping 120s to allow launcher to copy results..."
+                  sleep 120
+                  exit 0
+              env:
+              - name: TP
+                value: "$TP"
+              - name: DP
+                value: "$DP"
+              volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /tmp/signal
+                name: shared-signal
+              - mountPath: /workspace/
+                name: client-results-volume
+              - mountPath: /workspace/weights
+                name: shared-cache-volume
+                subPath: hub
+                readOnly: true
+              - mountPath: /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh
+                name: script-volume
+                subPath: qwen3.5_fp8_tpu7.sh
+              - mountPath: /workspace/InferenceX/benchmarks/benchmark_lib.sh
+                name: script-volume
+                subPath: benchmark_lib.sh
+            restartPolicy: Never
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - emptyDir: {}
+              name: shared-signal
+            - name: client-results-volume
+              emptyDir: {}
+            - name: script-volume
+              configMap:
+                name: tpu-benchmark-scripts
+            - name: shared-cache-volume
+              persistentVolumeClaim:
+                claimName: vllm-shared-cache-pvc
