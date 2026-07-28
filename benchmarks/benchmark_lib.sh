@@ -331,6 +331,7 @@ wait_for_server_ready() {
 # Parameters:
 #   --model: Model name
 #   --port: Server port
+#   --host: Server hostname or IP address (defaults to 0.0.0.0 if not provided)
 #   --backend: Backend type - e.g., 'vllm' or 'openai'
 #   --endpoint: Optional API endpoint override
 #   --input-len: Random input sequence length
@@ -375,12 +376,20 @@ run_benchmark_serving() {
 
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --served-model-name)
+                served_model_name="$2"
+                shift 2
+                ;;
             --model)
                 model="$2"
                 shift 2
                 ;;
             --port)
                 port="$2"
+                shift 2
+                ;;
+            --host)
+                host="$2"
                 shift 2
                 ;;
             --backend)
@@ -513,12 +522,17 @@ run_benchmark_serving() {
         num_prompts="$max_concurrency"
     fi
 
+    # Default host to 0.0.0.0 if not provided
+    if [[ -z "$host" ]]; then
+        host="0.0.0.0"
+    fi
+
     # Build benchmark command
     local benchmark_cmd=(
         python3 "$workspace_dir/utils/bench_serving/benchmark_serving.py"
         --model "$model"
         --backend "$backend"
-        --base-url "http://0.0.0.0:$port"
+        --base-url "http://$host:$port"
         --dataset-name random
         --random-input-len "$input_len"
         --random-output-len "$output_len"
@@ -537,6 +551,10 @@ run_benchmark_serving() {
 
     if [[ -n "$endpoint" ]]; then
         benchmark_cmd+=(--endpoint "$endpoint")
+    fi
+
+    if [[ -n "$served_model_name" ]]; then
+        benchmark_cmd+=(--served-model-name "$served_model_name")
     fi
     
     # Add --use-chat-template if requested

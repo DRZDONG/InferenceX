@@ -5060,3 +5060,9 @@
     - "Re-pin VLLM_ROUTER_IMAGE to vllm/vllm-router:nightly-20260716-1fbcde7 (previous nightly-20260629-e667ebb was garbage-collected from Docker Hub)"
     - "Exclude known-bad nodes mia1-p01-g09,g14 from the disagg node pool"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/2301
+
+- config-keys:
+    - qwen3p5-fp8-tpu7x-vllm
+  description:
+    - "Add Qwen 3.5 397B FP8 TPU v7 benchmark"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/dummy

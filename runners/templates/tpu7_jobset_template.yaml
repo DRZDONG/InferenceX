@@ -22,6 +22,24 @@ spec:
         backoffLimit: 0
         template:
           spec:
+            initContainers:
+            - name: clone-repo
+              image: alpine/git:latest
+              command:
+              - /bin/sh
+              - -c
+              - |
+                git clone https://github.com/SemiAnalysisAI/InferenceX.git /workspace/InferenceX
+                cd /workspace/InferenceX
+                if [ -n "$COMMIT_SHA" ]; then
+                  git checkout "$COMMIT_SHA"
+                fi
+              env:
+              - name: COMMIT_SHA
+                value: "${COMMIT_SHA}"
+              volumeMounts:
+              - name: repo-volume
+                mountPath: /workspace/InferenceX
             containers:
             - name: vllm-server
               image: "$IMAGE"
@@ -44,6 +62,15 @@ spec:
                   export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
                   export ATTENTION_BACKEND=${ATTENTION_BACKEND:-CUSTOM}
                   export ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}
+                  export LIBTPU_INIT_ARGS=" --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false"
+                  export CLOUD_TPU_TASK_ID=0
+                  export TPU_WORKER_ID=0
+                  
+                  # JobSet automatically injects MegaScale variables, which crashes single-host TPU XLA
+                  unset MEGASCALE_NUM_SLICES
+                  unset MEGASCALE_SLICE_ID
+                  unset MEGASCALE_COORDINATOR_ADDRESS
+                  unset MEGASCALE_PORT
                   
                   # Sourcing the execution script from the ConfigMap mount inside the container
                   bash /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh --mode server
@@ -76,12 +103,8 @@ spec:
               - mountPath: /root/.cache/huggingface/
                 name: shared-cache-volume
                 subPath: huggingface
-              - mountPath: /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh
-                name: script-volume
-                subPath: qwen3.5_fp8_tpu7.sh
-              - mountPath: /workspace/InferenceX/benchmarks/benchmark_lib.sh
-                name: script-volume
-                subPath: benchmark_lib.sh
+              - mountPath: /workspace/InferenceX
+                name: repo-volume
             nodeSelector:
               cloud.google.com/gke-accelerator-count: "4"
               cloud.google.com/gke-tpu-accelerator: "tpu7x"
@@ -103,9 +126,8 @@ spec:
             - name: shared-cache-volume
               persistentVolumeClaim:
                 claimName: vllm-shared-cache-pvc
-            - name: script-volume
-              configMap:
-                name: tpu-benchmark-scripts
+            - name: repo-volume
+              emptyDir: {}
 
   - name: sidecar-bench
     replicas: 1
@@ -115,6 +137,24 @@ spec:
         backoffLimit: 0
         template:
           spec:
+            initContainers:
+            - name: clone-repo
+              image: alpine/git:latest
+              command:
+              - /bin/sh
+              - -c
+              - |
+                git clone https://github.com/SemiAnalysisAI/InferenceX.git /workspace/InferenceX
+                cd /workspace/InferenceX
+                if [ -n "$COMMIT_SHA" ]; then
+                  git checkout "$COMMIT_SHA"
+                fi
+              env:
+              - name: COMMIT_SHA
+                value: "${COMMIT_SHA}"
+              volumeMounts:
+              - name: repo-volume
+                mountPath: /workspace/InferenceX
             containers:
             - name: sidecar-bench
               image: "$IMAGE"
@@ -139,7 +179,7 @@ spec:
                   if [ $BENCH_EXIT_CODE -ne 0 ]; then
                       echo "Error: Benchmark execution failed with exit code $BENCH_EXIT_CODE" >&2
                       touch /tmp/signal/done
-                      sleep 30
+                      sleep 3600
                       exit $BENCH_EXIT_CODE
                   fi
                   
@@ -163,12 +203,19 @@ spec:
                 name: shared-cache-volume
                 subPath: hub
                 readOnly: true
-              - mountPath: /workspace/InferenceX/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh
-                name: script-volume
-                subPath: qwen3.5_fp8_tpu7.sh
-              - mountPath: /workspace/InferenceX/benchmarks/benchmark_lib.sh
-                name: script-volume
-                subPath: benchmark_lib.sh
+              - mountPath: /workspace/InferenceX
+                name: repo-volume
+            nodeSelector:
+              cloud.google.com/gke-accelerator-count: "4"
+              cloud.google.com/gke-tpu-accelerator: "tpu7x"
+              cloud.google.com/gke-tpu-topology: "2x2x1"
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            - key: node.kubernetes.io/disk-pressure
+              operator: Exists
+              effect: NoSchedule
             restartPolicy: Never
             volumes:
             - name: dshm
@@ -178,9 +225,8 @@ spec:
               name: shared-signal
             - name: client-results-volume
               emptyDir: {}
-            - name: script-volume
-              configMap:
-                name: tpu-benchmark-scripts
+            - name: repo-volume
+              emptyDir: {}
             - name: shared-cache-volume
               persistentVolumeClaim:
                 claimName: vllm-shared-cache-pvc

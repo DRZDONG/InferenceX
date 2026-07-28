@@ -28,11 +28,7 @@ mkdir -p "$RESULTS_DIR"
 
 echo "=== Initializing GKE ConfigMap & Namespace for TPU Benchmark Scripts ==="
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create configmap tpu-benchmark-scripts \
-  --from-file=qwen3.5_fp8_tpu7.sh="$REPO_ROOT/benchmarks/single_node/fixed_seq_len/qwen3.5_fp8_tpu7.sh" \
-  --from-file=benchmark_lib.sh="$REPO_ROOT/benchmarks/benchmark_lib.sh" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+export COMMIT_SHA=$(git rev-parse HEAD)
 
 SUBMITTED_JOBS=()
 
@@ -61,7 +57,7 @@ for conc in $CONC_LIST; do
   echo "Submitting TPU JobSet to GKE Kueue: $JOB_NAME (Concurrency: $conc, ISL/OSL: ${ISL}/${OSL})"
 
   # Render template and apply directly to Kueue queue
-  envsubst < "$TEMPLATE_FILE" | kubectl apply -n "$NAMESPACE" -f -
+  envsubst '${JOB_NAME} ${IMAGE} ${MODEL} ${TP} ${DP} ${ISL} ${OSL} ${CONC} ${GPU_MEM_UTIL} ${ATTENTION_BACKEND} ${ONEHOT_MOE_PERMUTE_THRESHOLD} ${NAMESPACE} ${KUEUE_NAME} ${COMMIT_SHA}' < "$TEMPLATE_FILE" | kubectl apply -n "$NAMESPACE" -f -
   SUBMITTED_JOBS+=("$JOB_NAME")
   sleep 1
 done
