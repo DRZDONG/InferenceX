@@ -45,6 +45,7 @@ class Fields(Enum):
 
     # Search-space/benchmark fields
     TP = 'tp'
+    DP = 'dp'
     PP = 'pp'
     DCP_SIZE = 'dcp-size'
     PCP_SIZE = 'pcp-size'
@@ -163,6 +164,7 @@ class SingleNodeMatrixEntry(BaseModel):
     isl: int
     osl: int
     tp: int
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
     pp: int = Field(gt=0, strict=True)
     dcp_size: int = Field(alias=Fields.DCP_SIZE.value, gt=0, strict=True)
     pcp_size: int = Field(alias=Fields.PCP_SIZE.value, gt=0, strict=True)
@@ -478,6 +480,7 @@ class SingleNodeSearchSpaceEntry(BaseModel):
     model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
     tp: int
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
     pp: int = Field(default=1, gt=0, strict=True)
     dcp_size: int = Field(
         default=1, alias=Fields.DCP_SIZE.value, gt=0, strict=True)

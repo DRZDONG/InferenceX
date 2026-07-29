@@ -12,13 +12,16 @@ qwen3p5-fp8-tpu7x-vllm:
       osl: 1024
       search-space:
       - tp: 8
+        dp: 1
         conc-list: [4, 8, 16, 32, 64, 128, 256]
     - isl: 8192
       osl: 1024
       search-space:
       - tp: 8
+        dp: 1
         conc-list: [4, 8, 16, 32, 64]
       - tp: 1
+        dp: 8
         conc-list: [128, 256]
         additional-settings:
           - "DP_SCHED_ENABLED=1 "

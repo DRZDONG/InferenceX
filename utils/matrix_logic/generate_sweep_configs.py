@@ -574,6 +574,7 @@ def generate_full_sweep(args, all_config_data, runner_data):
                 else:
                     # Single-node configuration
                     tp = bmk[Fields.TP.value]
+                    dp = bmk.get(Fields.DP.value)
                     pp = bmk.get(Fields.PP.value, 1)
                     dcp_size = bmk.get(Fields.DCP_SIZE.value, 1)
                     pcp_size = bmk.get(Fields.PCP_SIZE.value, 1)
@@ -684,6 +685,8 @@ def generate_full_sweep(args, all_config_data, runner_data):
 
                             if ep is not None:
                                 entry[Fields.EP.value] = ep
+                            if dp is not None:
+                                entry[Fields.DP.value] = dp
                             if dp_attn is not None:
                                 entry[Fields.DP_ATTN.value] = dp_attn
 
