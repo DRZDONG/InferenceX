@@ -372,6 +372,7 @@ run_benchmark_serving() {
     local server_pid=""
     local tokenizer=""
     local tokenizer_mode=""
+    local served_model_name=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -446,6 +447,10 @@ run_benchmark_serving() {
                 ;;
             --tokenizer-mode)
                 tokenizer_mode="$2"
+                shift 2
+                ;;
+            --served-model-name)
+                served_model_name="$2"
                 shift 2
                 ;;
             *)
@@ -561,6 +566,10 @@ run_benchmark_serving() {
 
     if [[ -n "$tokenizer_mode" ]]; then
         benchmark_cmd+=(--tokenizer-mode "$tokenizer_mode")
+    fi
+
+    if [[ -n "$served_model_name" ]]; then
+        benchmark_cmd+=(--served-model-name "$served_model_name")
     fi
 
     # Run benchmark with optional server monitoring
