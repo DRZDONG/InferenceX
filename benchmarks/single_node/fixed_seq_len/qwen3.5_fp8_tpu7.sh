@@ -90,9 +90,11 @@ if [[ "$MODE" == "server" ]]; then
     --tensor-parallel-size "${TP}" \
     --data-parallel-size "${DP}" \
     --max-model-len="${MAX_MODEL_LEN}" \
+    --quantization="${QUANTIZATION:-fp8}" \
     --max-num-batched-tokens="${MAX_NUM_BATCHED_TOKENS}" \
     --max-num-seqs="${MAX_NUM_SEQS}" \
     --async-scheduling \
+    --prefill-schedule-interval=256 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization="${GPU_MEM_UTIL}" \
     --kv-cache-dtype=fp8 \
@@ -100,7 +102,8 @@ if [[ "$MODE" == "server" ]]; then
     --enable-expert-parallel \
     --attention-backend "${ATTENTION_BACKEND}" \
     --block-size 256 \
-    --limit-mm-per-prompt '{"image":0,"video":0}'
+    --limit-mm-per-prompt '{"image":0,"video":0}' \
+    --default-chat-template-kwargs '{"enable_thinking":false}'
 
 elif [[ "$MODE" == "client" ]]; then
   # Wait for server to be ready (pointing to host:port)
@@ -122,7 +125,6 @@ elif [[ "$MODE" == "client" ]]; then
     run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
-        --host "$HOST" \
         --backend vllm \
         --input-len "$ISL" \
         --output-len "$OSL" \
