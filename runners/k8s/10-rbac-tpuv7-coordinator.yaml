@@ -1,0 +1,91 @@
+# RBAC for the tpuv7 ARC coordinator SA (created by the gha-runner-scale-set helm
+# release, 09-arc-tpuv7-values.yaml) so runners/launch_tpuv7-gke.sh can spawn and
+# monitor per-point benchmark Jobs on the tpu7x node pool. Mirrors the v6e RBAC
+# (runners/k8s/07-rbac-coordinator.yaml).
+#
+# Also covers runners/launch_tpuv7-disagg-gke.sh (disaggregated P/D sweep), which additionally
+# creates standalone engine Pods (prefill/decode), headless Services for them, and a ConfigMap
+# for the proxy code -- hence pods:create/delete + services + configmaps below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tpuv7-coordinator
+  namespace: arc-runners
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tpuv7-coordinator
+  namespace: arc-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tpuv7-coordinator
+subjects:
+- kind: ServiceAccount
+  name: tpuv7-gha-rs-no-permission
+  namespace: arc-runners

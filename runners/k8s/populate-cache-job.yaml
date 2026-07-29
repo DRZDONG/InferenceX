@@ -1,0 +1,59 @@
+# One-off Job to populate the golden RW cache PVC (model-cache) with HF weights,
+# BEFORE snapshotting it into the shared ReadOnlyMany cache (gemma-cache-ro).
+#
+# IMPORTANT: must run on a TPU node. The e2 CPU node pool cannot attach
+# hyperdisk-balanced disks ("disk type cannot be used by e2-standard-* machine
+# type"), so this Job tolerates the TPU taint and pins to the TPU slice WITHOUT
+# requesting any chips (so it doesn't consume the accelerator).
+#
+# Prereqs:
+#   - PVC model-cache exists (04-pvc-model-cache.yaml)
+#   - Secret hf-token exists with key HF_TOKEN (gated google/* repos need it):
+#       kubectl -n arc-runners create secret generic hf-token --from-literal=HF_TOKEN=hf_xxx
+# After it Completes, snapshot model-cache (05) then create gemma-cache-ro (06).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-cache
+  namespace: arc-runners
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 1800
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 2x4
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+      containers:
+        - name: populate
+          image: python:3.12-slim
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: HF_TOKEN }
+            - name: HF_HUB_CACHE
+              value: /mnt/models/hf-hub-cache/hub
+            # space-separated list of repos to bake into the cache (target + MTP drafter)
+            - name: MODELS
+              value: "google/gemma-4-26B-A4B-it google/gemma-4-26B-A4B-it-assistant"
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              pip install -q "huggingface_hub[cli]"
+              for m in $MODELS; do echo "[populate] downloading $m"; hf download "$m"; done
+              echo "[populate] cache contents:"; du -sh /mnt/models/hf-hub-cache/hub/* 2>/dev/null || true
+              echo "[populate] DONE"
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+          volumeMounts:
+            - { name: model-cache, mountPath: /mnt/models/hf-hub-cache }

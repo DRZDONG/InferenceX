@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    meta.helm.sh/release-name: tpuv6e8
+    meta.helm.sh/release-namespace: arc-runners
+  labels:
+    actions.github.com/scale-set-name: tpuv6e8
+    actions.github.com/scale-set-namespace: arc-runners
+    app.kubernetes.io/instance: tpuv6e8
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: tpuv6e8
+    app.kubernetes.io/part-of: gha-rs
+    app.kubernetes.io/version: 0.14.2
+    helm.sh/chart: gha-rs-0.14.2
+  name: tpuv6e8-gha-rs-no-permission
+  namespace: arc-runners
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tpu-bench-coordinator
+  namespace: arc-runners
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tpu-bench-coordinator
+  namespace: arc-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tpu-bench-coordinator
+subjects:
+- kind: ServiceAccount
+  name: tpuv6e8-gha-rs-no-permission
+  namespace: arc-runners

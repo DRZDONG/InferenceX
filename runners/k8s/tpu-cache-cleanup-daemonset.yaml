@@ -1,0 +1,75 @@
+# Node-local compile-cache janitor for the TPU benchmark nodes.
+#
+# The per-point bench Jobs persist vLLM/JAX compile artifacts on the node hostPath
+# /var/lib/tpu-cache (mounted into each pod as /root/.cache) so points reuse compiled
+# shapes. That cache grows unbounded and, across multiple sweeps, fills the ~95Gi node
+# boot disk -> kubelet DiskPressure -> bench pods evicted mid-compile (sweep failures).
+#
+# This DaemonSet caps it: on each tpu7x node it LRU-prunes the oldest jax_compilation_cache
+# entries whenever the boot disk crosses HIGH_PCT, down to LOW_PCT. Oldest-first keeps the
+# currently-compiling point's (newest) entries; only stale shapes from past points are dropped.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tpu-cache-cleanup
+  namespace: arc-runners
+spec:
+  selector:
+    matchLabels: { app: tpu-cache-cleanup }
+  template:
+    metadata:
+      labels: { app: tpu-cache-cleanup }
+    spec:
+      # Run on every TPU node (any accelerator: tpu7x, tpu-v6e-slice, ...) on whichever
+      # cluster this is applied to — matches the label's presence, not a specific value.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-tpu-accelerator
+                    operator: Exists
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: tpu-cache
+          hostPath: { path: /var/lib/tpu-cache, type: DirectoryOrCreate }
+      containers:
+        - name: janitor
+          image: python:3.12-slim
+          env:
+            - { name: HIGH_PCT, value: "78" }
+            - { name: LOW_PCT, value: "60" }
+            - { name: INTERVAL, value: "60" }
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import os, shutil, time
+              CACHE="/host-cache"; JAX=os.path.join(CACHE,"jax_compilation_cache")
+              HIGH=int(os.environ["HIGH_PCT"]); LOW=int(os.environ["LOW_PCT"]); IV=int(os.environ["INTERVAL"])
+              def used():
+                  s=os.statvfs(CACHE); return 100*(s.f_blocks-s.f_bfree)//s.f_blocks
+              print(f"[janitor] start; cap {HIGH}%->{LOW}% on {CACHE}", flush=True)
+              while True:
+                  try:
+                      u=used()
+                      if u>=HIGH and os.path.isdir(JAX):
+                          ents=[os.path.join(JAX,e) for e in os.listdir(JAX)]
+                          ents.sort(key=lambda p: os.path.getmtime(p))  # oldest first
+                          for p in ents:
+                              if used()<LOW: break
+                              try:
+                                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+                              except OSError:
+                                  pass
+                          print(f"[janitor] pruned {u}% -> {used()}%", flush=True)
+                  except Exception as e:
+                      print(f"[janitor] err: {e}", flush=True)
+                  time.sleep(IV)
+          resources:
+            requests: { cpu: "50m", memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: tpu-cache, mountPath: /host-cache }

@@ -1,0 +1,9 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: qwen-cache-snap
+  namespace: arc-runners
+spec:
+  source:
+    persistentVolumeClaimName: qwen-cache
+  volumeSnapshotClassName: pd-snapshot-class

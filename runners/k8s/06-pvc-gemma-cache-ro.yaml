@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma-cache-ro
+  namespace: arc-runners
+spec:
+  accessModes:
+  - ReadOnlyMany
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: gemma-mtp-cache-snap
+  dataSourceRef:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: gemma-mtp-cache-snap
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: hyperdisk-ml-sc
+  volumeMode: Filesystem

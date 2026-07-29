@@ -1,0 +1,204 @@
+# Disaggregated prefill/decode topology for qwen3.5-397B-A17B-FP8 on TPU v7.
+#
+# Two tpu7x hosts (TP=8 each) -- one prefill (KV producer), one decode (KV consumer) -- plus a proxy
+# that sequences each request prefill->decode. Pinned from the upstream tpu-inference disagg
+# examples (run_disagg_single_host.sh, toy_proxy_server.py):
+#   - connector = TPUConnectorHMA @ tpu_inference.distributed.tpu_connector_hma (HMA-capable; required for hybrid qwen3.5); kv-transfer-config is
+#     MINIMAL (kv_connector / module / kv_role only).
+#   - KV addressing is via ENV: TPU_KV_TRANSFER_PORT (per role) + TPU_SIDE_CHANNEL_PORT (same value
+#     on both = rendezvous side channel). SKIP_JAX_PRECOMPILE=1, VLLM_XLA_CHECK_RECOMPILATION=0.
+#   - the proxy issues a max_tokens=1 prefill pass, reads kv_transfer_params from the prefill
+#     response, and injects them into the decode request -- that is how decode locates the KV.
+#
+# LIVE UNKNOWN (confirm during single-point iteration): whether the producer address advertised in
+# kv_transfer_params is reachable from the decode pod across hosts. If the connector advertises the
+# pod IP, headless-Service DNS + pod-to-pod routing should suffice; if it advertises localhost, the
+# pods may need hostNetwork or an explicit advertised-host env.
+#
+# Prereq (proxy code): create the proxy ConfigMap from the vendored upstream script --
+#   kubectl -n arc-runners create configmap disagg-proxy \
+#       --from-file=toy_proxy_server.py=runners/k8s/disagg/toy_proxy_server.py
+#
+# This manifest is the single-point iteration target (1k/1k). Apply it to the configured cluster.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-disagg-prefill
+  namespace: arc-runners
+spec:
+  clusterIP: None            # headless: stable per-pod DNS for the KV side channel
+  selector: { app: qwen-disagg, role: prefill }
+  ports:
+    - { name: http, port: 8888, targetPort: 8888 }
+    - { name: kv,   port: 7100, targetPort: 7100 }
+    - { name: side, port: 6100, targetPort: 6100 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-disagg-decode
+  namespace: arc-runners
+spec:
+  clusterIP: None
+  selector: { app: qwen-disagg, role: decode }
+  ports:
+    - { name: http, port: 8888, targetPort: 8888 }
+    - { name: kv,   port: 7200, targetPort: 7200 }
+    - { name: side, port: 6100, targetPort: 6100 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-disagg-proxy
+  namespace: arc-runners
+spec:
+  selector: { app: qwen-disagg, role: proxy }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+# prefill (KV producer). TP=8 single-host; serve config = validated v7 baseline + minimal
+# kv-transfer-config; KV addressing via TPU_KV_TRANSFER_PORT / TPU_SIDE_CHANNEL_PORT env.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-disagg-prefill
+  namespace: arc-runners
+  labels: { app: qwen-disagg, role: prefill }
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+    cloud.google.com/gke-tpu-topology: 2x2x1
+  tolerations:
+    - { key: google.com/tpu, operator: Exists, effect: NoSchedule }
+  volumes:
+    - name: tpu-cache
+      hostPath: { path: /var/lib/tpu-cache, type: DirectoryOrCreate }
+    - name: model-cache
+      persistentVolumeClaim: { claimName: qwen-cache-ro, readOnly: true }
+  containers:
+    - name: serve
+      image: vllm/vllm-tpu:nightly
+      command: ["bash","-c"]
+      args:
+        - |
+          set -x
+          mkdir -p /tmp/hfhub
+          for d in /mnt/models-ro/hub/models--*; do [ -e "$d" ] && ln -sfn "$d" "/tmp/hfhub/$(basename "$d")"; done
+          export HF_HUB_CACHE=/tmp/hfhub PYTHONPYCACHEPREFIX=/tmp/pycache/
+          export NEW_MODEL_DESIGN=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax PJRT_DEVICE=TPU
+          export USE_MOE_EP_KERNEL=0 RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d
+          export ONEHOT_MOE_PERMUTE_THRESHOLD=32768 DP_SCHED_BATCH_PREFILL=1
+          export ATTN_BUCKETIZED_NUM_REQS=true ATTN_CUSTOM_NUM_REQS_BUCKETS="1,2,4,8,16,32,64"
+          export JAX_COMPILATION_CACHE_DIR=/root/.cache/jax_compilation_cache
+          # baseline TPU/JAX env (mirrors qwen3.5_fp8_tpuv7.sh)
+          export JAX_PLATFORMS=tpu,cpu TPU_PREMAPPED_BUFFER_SIZE=17179869184 TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES=17179869184
+          export JAX_COORDINATOR_TIMEOUT=1200 JAX_DISTRIBUTED_TIMEOUT=1200 TPU_SDK_GRPC_TIMEOUT_SEC=1200
+          # disagg connector addressing (env, not kv-transfer-config)
+          export TPU_KV_TRANSFER_PORT=7100 TPU_SIDE_CHANNEL_PORT=6100
+          export TPU_ENABLE_D2H_TRANSFER=1 TPU_MAX_HOST_KV_BUFFER_SIZE=8   # PR #2019 HBM->DRAM KV offload (Track A); pool kept small to fit pinned-host memlock
+          export SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0
+          export VLLM_HOST_IP=$(hostname -i | awk '{print $1}')   # advertise pod IP for cross-pod KV
+          MODEL=Qwen/Qwen3.5-397B-A17B-FP8
+          KVT='{"kv_connector":"TPUConnectorHMA","kv_connector_module_path":"tpu_inference.distributed.tpu_connector_hma","kv_role":"kv_producer"}'
+          vllm serve "$MODEL" --host 0.0.0.0 --port 8888 --served-model-name "$MODEL" \
+            --max-model-len=2068 --tensor-parallel-size=8 --max-num-batched-tokens=2048 --max-num-seqs=64 \
+            --no-enable-prefix-caching --gpu-memory-utilization=0.90 --async-scheduling \
+            --limit-mm-per-prompt '{"image": 0, "video": 0}' --kv-cache-dtype=fp8 \
+            --mamba-ssm-cache-dtype bfloat16 --enable-chunked-prefill --enable-expert-parallel \
+            --language-model-only --disable-chunked-mm-input --block-size=256 \
+            --kv-transfer-config="$KVT" \
+            --no-disable-hybrid-kv-cache-manager
+      resources:
+        limits: { google.com/tpu: "4" }
+      volumeMounts:
+        - { name: tpu-cache, mountPath: /root/.cache }
+        - { name: model-cache, mountPath: /mnt/models-ro, readOnly: true }
+---
+# decode (KV consumer). Same serve config; kv_role=kv_consumer; its own KV-transfer port, same
+# side-channel rendezvous port as prefill.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-disagg-decode
+  namespace: arc-runners
+  labels: { app: qwen-disagg, role: decode }
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+    cloud.google.com/gke-tpu-topology: 2x2x1
+  tolerations:
+    - { key: google.com/tpu, operator: Exists, effect: NoSchedule }
+  volumes:
+    - name: tpu-cache
+      hostPath: { path: /var/lib/tpu-cache, type: DirectoryOrCreate }
+    - name: model-cache
+      persistentVolumeClaim: { claimName: qwen-cache-ro, readOnly: true }
+  containers:
+    - name: serve
+      image: vllm/vllm-tpu:nightly
+      command: ["bash","-c"]
+      args:
+        - |
+          set -x
+          mkdir -p /tmp/hfhub
+          for d in /mnt/models-ro/hub/models--*; do [ -e "$d" ] && ln -sfn "$d" "/tmp/hfhub/$(basename "$d")"; done
+          export HF_HUB_CACHE=/tmp/hfhub PYTHONPYCACHEPREFIX=/tmp/pycache/
+          export NEW_MODEL_DESIGN=1 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax PJRT_DEVICE=TPU
+          export USE_MOE_EP_KERNEL=0 RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d
+          export ONEHOT_MOE_PERMUTE_THRESHOLD=32768 DP_SCHED_BATCH_PREFILL=1
+          export ATTN_BUCKETIZED_NUM_REQS=true ATTN_CUSTOM_NUM_REQS_BUCKETS="1,2,4,8,16,32,64"
+          export JAX_COMPILATION_CACHE_DIR=/root/.cache/jax_compilation_cache
+          # baseline TPU/JAX env (mirrors qwen3.5_fp8_tpuv7.sh)
+          export JAX_PLATFORMS=tpu,cpu TPU_PREMAPPED_BUFFER_SIZE=17179869184 TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES=17179869184
+          export JAX_COORDINATOR_TIMEOUT=1200 JAX_DISTRIBUTED_TIMEOUT=1200 TPU_SDK_GRPC_TIMEOUT_SEC=1200
+          # disagg connector addressing (env, not kv-transfer-config)
+          export TPU_KV_TRANSFER_PORT=7200 TPU_SIDE_CHANNEL_PORT=6100
+          export SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0
+          export VLLM_HOST_IP=$(hostname -i | awk '{print $1}')   # advertise pod IP for cross-pod KV
+          MODEL=Qwen/Qwen3.5-397B-A17B-FP8
+          KVT='{"kv_connector":"TPUConnectorHMA","kv_connector_module_path":"tpu_inference.distributed.tpu_connector_hma","kv_role":"kv_consumer"}'
+          vllm serve "$MODEL" --host 0.0.0.0 --port 8888 --served-model-name "$MODEL" \
+            --max-model-len=2068 --tensor-parallel-size=8 --max-num-batched-tokens=2048 --max-num-seqs=64 \
+            --no-enable-prefix-caching --gpu-memory-utilization=0.90 --async-scheduling \
+            --limit-mm-per-prompt '{"image": 0, "video": 0}' --kv-cache-dtype=fp8 \
+            --mamba-ssm-cache-dtype bfloat16 --enable-chunked-prefill --enable-expert-parallel \
+            --language-model-only --disable-chunked-mm-input --block-size=256 \
+            --kv-transfer-config="$KVT" \
+            --no-disable-hybrid-kv-cache-manager
+      resources:
+        limits: { google.com/tpu: "4" }
+      volumeMounts:
+        - { name: tpu-cache, mountPath: /root/.cache }
+        - { name: model-cache, mountPath: /mnt/models-ro, readOnly: true }
+---
+# proxy: the vendored upstream FastAPI toy_proxy_server.py, pointed at the two engines. It relays
+# kv_transfer_params from prefill into the decode request (the P/D handshake).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-disagg-proxy
+  namespace: arc-runners
+  labels: { app: qwen-disagg, role: proxy }
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: proxy-code
+      configMap: { name: disagg-proxy }
+  containers:
+    - name: proxy
+      image: python:3.12-slim
+      command: ["bash","-c"]
+      args:
+        - |
+          set -ex
+          pip install --no-cache-dir fastapi httpx uvicorn >/dev/null || { echo "pip install of proxy deps failed"; exit 1; }
+          python /code/toy_proxy_server.py --host 0.0.0.0 --port 8000 \
+            --prefiller-hosts qwen-disagg-prefill.arc-runners.svc.cluster.local --prefiller-ports 8888 \
+            --decoder-hosts  qwen-disagg-decode.arc-runners.svc.cluster.local  --decoder-ports  8888
+      ports:
+        - { containerPort: 8000 }
+      volumeMounts:
+        - { name: proxy-code, mountPath: /code }

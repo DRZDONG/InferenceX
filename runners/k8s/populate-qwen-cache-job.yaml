@@ -1,0 +1,58 @@
+# One-off Job to populate the golden RW cache PVC (qwen-cache) with HF weights,
+# BEFORE snapshotting it into the shared ReadOnlyMany cache (qwen-cache-ro).
+#
+# IMPORTANT: must run on a tpu7x node. The e2 CPU node pool cannot attach
+# hyperdisk-balanced disks, so this Job tolerates the TPU taint and pins to the
+# tpu7x slice WITHOUT requesting any chips (so it doesn't consume the accelerator).
+#
+# Prereqs:
+#   - PVC qwen-cache exists (11-pvc-qwen-cache.yaml)
+#   - Secret hf-token exists with key HF_TOKEN (needed if the repo is gated):
+#       kubectl -n arc-runners create secret generic hf-token --from-literal=HF_TOKEN=hf_xxx
+# After it Completes, snapshot qwen-cache (12) then create qwen-cache-ro (13).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-qwen-cache
+  namespace: arc-runners
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 1800
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: qwen-cache
+          persistentVolumeClaim:
+            claimName: qwen-cache
+      containers:
+        - name: populate
+          image: python:3.12-slim
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: HF_TOKEN }
+            - name: HF_HUB_CACHE
+              value: /mnt/models/hf-hub-cache/hub
+            # space-separated list of repos to bake into the cache
+            - name: MODELS
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              pip install -q "huggingface_hub[cli]"
+              for m in $MODELS; do echo "[populate] downloading $m"; hf download "$m"; done
+              echo "[populate] cache contents:"; du -sh /mnt/models/hf-hub-cache/hub/* 2>/dev/null || true
+              echo "[populate] DONE"
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+          volumeMounts:
+            - { name: qwen-cache, mountPath: /mnt/models/hf-hub-cache }

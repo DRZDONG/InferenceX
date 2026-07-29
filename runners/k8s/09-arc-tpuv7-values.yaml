@@ -1,0 +1,19 @@
+# Thin coordinator runner for v7: a CPU pod that runs runners/launch_tpuv7-gke.sh,
+# which spawns one per-point benchmark Job on the tpu7x node pool (mirrors the v6e
+# runner). It must NOT hold a TPU itself. maxRunners=6 = one coordinator per
+# tpu7x-standard-4t node in the configured GKE cluster:
+# 6 nodes x 4 chips = 24 chips from the configured TPU reservation.
+# Registered to InferenceX-Private-TPU.
+githubConfigUrl: "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU"
+githubConfigSecret: arc-tpu-github
+
+# Avoid the chart's cluster-wide Deployment lookup. This is also required when
+# reconciling the release with the controller's deliberately scoped service
+# account during stale scale-set recovery.
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-controller-gha-rs-controller
+
+runnerScaleSetName: "tpuv7"
+minRunners: 0
+maxRunners: 6

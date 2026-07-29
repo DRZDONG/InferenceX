@@ -1,0 +1,80 @@
+name: TPU v7 Smoke Sweep
+run-name: TPU v7 Smoke Sweep (${{ inputs.image }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: TPU runtime image to validate
+        required: true
+        default: vllm/vllm-tpu:nightly
+        type: string
+      run-compute-sweep:
+        description: Run the three-point JAX compute sweep
+        required: true
+        default: true
+        type: boolean
+      run-qwen-canary:
+        description: Also run one production Qwen3.5 1k/1k benchmark point
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  compute-sweep:
+    if: ${{ inputs.run-compute-sweep }}
+    name: JAX compute / ${{ matrix.matrix-size }}x${{ matrix.matrix-size }}
+    runs-on: tpuv7
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        matrix-size: [512, 1024, 2048]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          clean: true
+          fetch-depth: 1
+          submodules: false
+
+      - name: Run TPU compute probe
+        env:
+          TPU_TEST_IMAGE: ${{ inputs.image }}
+          TPU_TEST_MATRIX_SIZE: ${{ matrix.matrix-size }}
+        run: bash runners/test_tpuv7-gke.sh
+
+      - name: Upload probe result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tpuv7-smoke-${{ matrix.matrix-size }}
+          path: tpuv7-smoke-${{ matrix.matrix-size }}.json
+          if-no-files-found: error
+
+  qwen-canary:
+    if: ${{ inputs.run-qwen-canary }}
+    uses: ./.github/workflows/benchmark-tmpl.yml
+    name: Qwen3.5 production canary /
+    secrets: inherit
+    with:
+      exp-name: qwen3.5-fp8-tpuv7-vllm
+      image: ${{ inputs.image }}
+      model: Qwen/Qwen3.5-397B-A17B-FP8
+      model-prefix: qwen3.5
+      runner: tpuv7
+      precision: fp8
+      framework: vllm
+      isl: "1024"
+      osl: "1024"
+      max-model-len: "2068"
+      tp: "8"
+      ep: "8"
+      dp-attn: true
+      conc: "4"
+      spec-decoding: none
+      disagg: ${{ 'false' }}
+      run-eval: false

@@ -1,0 +1,14 @@
+# Thin coordinator runner: a CPU pod that spawns per-config TPU Jobs (see
+# runners/launch_tpuv6e8-gke.sh). It must NOT hold the TPU itself, or the
+# spawned Job would have no chips left. Default runner image is fine (the
+# launcher curls kubectl if missing); SA tpuv6e8-gha-rs-no-permission carries
+# the tpu-bench-coordinator RBAC.
+githubConfigUrl: "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU"
+githubConfigSecret: arc-tpu-github
+runnerScaleSetName: "tpuv6e8"
+minRunners: 0
+# 4 = one coordinator per TPU node (ghostlite = 4x ct6e-standard-8t). Jobs now mount
+# the shared ReadOnlyMany cache (gemma-cache-ro) instead of cloning the snapshot per job,
+# so the per-snapshot clone-rate limit (RESOURCE_OPERATION_RATE_EXCEEDED) that previously
+# forced this to 2 no longer applies and all 4 nodes can run concurrently.
+maxRunners: 4
