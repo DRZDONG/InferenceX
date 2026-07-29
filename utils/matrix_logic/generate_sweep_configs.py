@@ -689,6 +689,8 @@ def generate_full_sweep(args, all_config_data, runner_data):
                                 entry[Fields.DP.value] = dp
                             if dp_attn is not None:
                                 entry[Fields.DP_ATTN.value] = dp_attn
+                            if bmk.get(Fields.ADDITIONAL_SETTINGS.value):
+                                entry[Fields.ADDITIONAL_SETTINGS.value] = bmk.get(Fields.ADDITIONAL_SETTINGS.value)
 
                             entry.update(component_metadata(bmk, val))
                             validate_matrix_entry(entry, is_multinode)
