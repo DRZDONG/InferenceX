@@ -42,6 +42,7 @@ class Fields(Enum):
     CONC_END = 'conc-end'
     CONC_LIST = 'conc-list'
     EP = 'ep'
+    DP = 'dp'
     DP_ATTN = 'dp-attn'
 
     # Multinode-specific fields (when MULTINODE = true)
@@ -111,6 +112,10 @@ class SingleNodeMatrixEntry(BaseModel):
     disagg: Literal[False]
     run_eval: bool = Field(alias=Fields.RUN_EVAL.value)
     eval_only: bool = Field(alias=Fields.EVAL_ONLY.value, default=False)
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
+    additional_settings: Optional[List[str]] = Field(
+        default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
+
 
 
 class WorkerConfig(BaseModel):
@@ -352,8 +357,12 @@ class SingleNodeSearchSpaceEntry(BaseModel):
 
     tp: int
     ep: Optional[int] = None
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
+    additional_settings: Optional[List[str]] = Field(
+        default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
     spec_decoding: Literal["mtp", "draft_model", "none"] = Field(
         default="none", alias=Fields.SPEC_DECODING.value)
+
     dp_attn: Optional[bool] = Field(
         default=None, alias=Fields.DP_ATTN.value)
     conc_start: Optional[int] = Field(

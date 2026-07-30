@@ -802,7 +802,9 @@ def generate_test_config_sweep(args, all_config_data, runner_data=None):
                     # Single-node config
                     tp = bmk[Fields.TP.value]
                     ep = bmk.get(Fields.EP.value)
+                    dp = bmk.get(Fields.DP.value)
                     dp_attn = bmk.get(Fields.DP_ATTN.value)
+                    additional_settings = bmk.get(Fields.ADDITIONAL_SETTINGS.value)
                     spec_decoding = bmk.get(Fields.SPEC_DECODING.value, "none")
 
                     # Get concurrency values
@@ -849,6 +851,10 @@ def generate_test_config_sweep(args, all_config_data, runner_data=None):
                                 Fields.DISAGG.value: disagg,
                                 Fields.RUN_EVAL.value: False,
                             }
+                            if dp is not None:
+                                entry[Fields.DP.value] = dp
+                            if additional_settings:
+                                entry[Fields.ADDITIONAL_SETTINGS.value] = additional_settings
                             matrix_values.append(validate_matrix_entry(entry, is_multinode=False))
 
         # ---- Agentic-coding scenarios ----
