@@ -362,7 +362,6 @@ class SingleNodeSearchSpaceEntry(BaseModel):
         default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
     spec_decoding: Literal["mtp", "draft_model", "none"] = Field(
         default="none", alias=Fields.SPEC_DECODING.value)
-
     dp_attn: Optional[bool] = Field(
         default=None, alias=Fields.DP_ATTN.value)
     conc_start: Optional[int] = Field(
