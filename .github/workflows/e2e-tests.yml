@@ -1,6 +1,10 @@
 name: End-to-End Tests
 run-name: e2e Test - ${{ inputs.test-name || inputs.generate-cli-command || github.event.inputs.generate-cli-command }}
 
+permissions:
+  contents: read
+  actions: read
+
 on:
     workflow_dispatch:
         inputs:
