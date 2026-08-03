@@ -269,6 +269,8 @@ jobs:
             pcp-size: ${{ matrix.config.pcp-size }}
             ep: ${{ matrix.config.ep }}
             dp-attn: ${{ matrix.config.dp-attn }}
+            dp: ${{ matrix.config.dp || '' }}
+            additional-settings: ${{ toJson(matrix.config.additional-settings) }}
             conc: ${{ matrix.config.conc }}
             kv-offloading: ${{ matrix.config.kv-offloading }}
             kv-offload-backend: ${{ matrix.config['kv-offload-backend'].name }}
@@ -308,6 +310,8 @@ jobs:
             tp: ${{ matrix.config.tp }}
             ep: ${{ matrix.config.ep }}
             dp-attn: ${{ matrix.config.dp-attn }}
+            dp: ${{ matrix.config.dp || '' }}
+            additional-settings: ${{ toJson(matrix.config.additional-settings) }}
             conc: ${{ matrix.config.conc }}
             kv-offloading: ${{ matrix.config.kv-offloading }}
             kv-offload-backend: ${{ matrix.config.kv-offload-backend }}
@@ -413,6 +417,8 @@ jobs:
             pcp-size: ${{ matrix.config.pcp-size }}
             ep: ${{ matrix.config.ep }}
             dp-attn: ${{ matrix.config.dp-attn }}
+            dp: ${{ matrix.config.dp || '' }}
+            additional-settings: ${{ toJson(matrix.config.additional-settings) }}
             conc: ${{ matrix.config.conc }}
             spec-decoding: ${{ matrix.config.spec-decoding }}
             disagg: ${{ matrix.config.disagg }}
@@ -450,6 +456,8 @@ jobs:
             pcp-size: ${{ matrix.config.pcp-size }}
             ep: ${{ matrix.config.ep }}
             dp-attn: ${{ matrix.config.dp-attn }}
+            dp: ${{ matrix.config.dp || '' }}
+            additional-settings: ${{ toJson(matrix.config.additional-settings) }}
             conc: ${{ matrix.config.conc }}
             spec-decoding: ${{ matrix.config.spec-decoding }}
             disagg: ${{ matrix.config.disagg }}

@@ -29,17 +29,16 @@ export PYTHONNOUSERSITE=1
 
 # --- TPU v7 / tpu_inference serving environment (from the validated JobSet) ---
 export ATTN_BUCKETIZED_NUM_REQS="${ATTN_BUCKETIZED_NUM_REQS:-true}"
-export ATTN_CUSTOM_NUM_REQS_BUCKETS="${ATTN_CUSTOM_NUM_REQS_BUCKETS:-4,8,16,32,64}"
+export ATTN_CUSTOM_NUM_REQS_BUCKETS="${ATTN_CUSTOM_NUM_REQS_BUCKETS:-8,16,32,64}"
 export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
 export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-1}"
-export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-1}"
+export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}"
 export USE_MOE_EP_KERNEL="${USE_MOE_EP_KERNEL:-0}"
 export USE_MOE_SPARSE_CORE="${USE_MOE_SPARSE_CORE:-1}"
 export ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-true}"
 export RAGGED_GATED_DELTA_RULE_IMPL="${RAGGED_GATED_DELTA_RULE_IMPL:-chunked_kernel_v3_pd}"
 export MIN_TOKEN_BUCKET="${MIN_TOKEN_BUCKET:-8}"
 export VLLM_MOE_CHUNK_SIZE="${VLLM_MOE_CHUNK_SIZE:-256}"
-export SLICE_ROPE_CACHE="${SLICE_ROPE_CACHE:-1}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false}"
 export MODEL_IMPL_TYPE="vllm"
 export TPU_BACKEND_TYPE="jax"
@@ -66,12 +65,24 @@ SERVER_LOG=/workdir/server.log
 PORT=${PORT:-8888}
 
 if [ -z "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
-    if [ "$ISL" -ge 4096 ]; then
-        MAX_NUM_BATCHED_TOKENS=1024
+    DP_VAL="${DP:-1}"
+    VAL=$(( ISL / DP_VAL ))
+    if [ "$VAL" -gt 1024 ]; then
+        MAX_NUM_BATCHED_TOKENS="$VAL"
     else
-        MAX_NUM_BATCHED_TOKENS=2048
+        MAX_NUM_BATCHED_TOKENS=1024
     fi
 fi
+
+if [ -z "${MAX_NUM_SEQS:-}" ]; then
+    DP_VAL="${DP:-1}"
+    if [ "$TP" -gt "$DP_VAL" ]; then
+        MAX_NUM_SEQS="64"
+    else
+        MAX_NUM_SEQS="$(( CONC / 4 ))"
+    fi
+fi
+
 set -x
 vllm serve "$MODEL" --host 0.0.0.0 --port "$PORT" \
     --served-model-name="$MODEL" \
@@ -79,8 +90,8 @@ vllm serve "$MODEL" --host 0.0.0.0 --port "$PORT" \
     --tensor-parallel-size="$TP" \
     --data-parallel-size="$DP" \
     --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS} \
-    --max-num-seqs="$(( CONC / 4 ))" \
-    --gpu-memory-utilization=${GPU_MEM_UTIL:-0.90} \
+    --max-num-seqs="${MAX_NUM_SEQS}" \
+    --gpu-memory-utilization=${GPU_MEM_UTIL:-0.92} \
     --async-scheduling \
     --quantization="fp8" \
     --prefill-schedule-interval=256 \
