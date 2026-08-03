@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-NS="${TPU_BENCH_NAMESPACE:-${NAMESPACE:-inferencex-jobs}}"
+NS="${TPU_BENCH_NAMESPACE:-${NAMESPACE:-arc-runners}}"
 # Shared ReadOnlyMany HF cache (no per-job clone, all nodes concurrent). Used ONLY for
 # models baked into it ($RO_CACHE_MODELS); any other config falls back to a per-job CoW
 # clone of $SNAP (RWO, roomy writable disk for online download). Set TPU_CACHE_RO_PVC=""
