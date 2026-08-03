@@ -294,12 +294,10 @@ jobs:
           fi
 
           LAUNCHER=""
-          if [ "${RUNNER_TYPE}" = "tpuv7" ] || [ "${RUNNER_TYPE}" = "tpu7x" ]; then
-            if [ -f "./runners/launch_tpu7x-google.sh" ]; then
-              LAUNCHER="./runners/launch_tpu7x-google.sh"
-            elif [ -f "./runners/launch_tpuv7-gke.sh" ]; then
-              LAUNCHER="./runners/launch_tpuv7-gke.sh"
-            fi
+          if [ "${RUNNER_TYPE}" = "tpuv7" ] && [ -f "./runners/launch_tpuv7-gke.sh" ]; then
+            LAUNCHER="./runners/launch_tpuv7-gke.sh"
+          elif [ "${RUNNER_TYPE}" = "tpu7x" ] && [ -f "./runners/launch_tpu7x-google.sh" ]; then
+            LAUNCHER="./runners/launch_tpu7x-google.sh"
           fi
           if [ -z "$LAUNCHER" ] && [ -f "./runners/launch_${RUNNER_TYPE%%_*}.sh" ]; then
             LAUNCHER="./runners/launch_${RUNNER_TYPE%%_*}.sh"

@@ -319,12 +319,9 @@ jobs:
           export ${{ join(fromJson(inputs.prefill-additional-settings), ' ') }} ${{ join(fromJson(inputs.decode-additional-settings), ' ') }}
           export IS_MULTINODE=true
           LAUNCHER=""
-          if [ "${RUNNER_TYPE}" = "tpuv7" ] || [ "${RUNNER_TYPE}" = "tpu7x" ]; then
-            if [ -f "./runners/launch_tpu7x-google.sh" ]; then
-              LAUNCHER="./runners/launch_tpu7x-google.sh"
-            elif [ -f "./runners/launch_tpuv7-gke.sh" ]; then
-              LAUNCHER="./runners/launch_tpuv7-gke.sh"
-            fi
+          if { [ "${RUNNER_TYPE}" = "tpuv7" ] || [ "${RUNNER_TYPE}" = "tpu7x" ]; } &&
+             [ -f "./runners/launch_tpuv7-disagg-gke.sh" ]; then
+            LAUNCHER="./runners/launch_tpuv7-disagg-gke.sh"
           fi
           if [ -z "$LAUNCHER" ] && [ -f "./runners/launch_${RUNNER_TYPE%%_*}.sh" ]; then
             LAUNCHER="./runners/launch_${RUNNER_TYPE%%_*}.sh"
