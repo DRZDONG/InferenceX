@@ -302,7 +302,6 @@ jobs:
           clean: true
           # TPU benchmarks do not use the agentic aiperf submodule.
           submodules: ${{ startsWith(inputs.runner, 'tpu') && 'false' || 'true' }}
-          persist-credentials: false
 
       - name: Launch multi-node job script
         env:
