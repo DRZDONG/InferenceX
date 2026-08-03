@@ -282,7 +282,9 @@ jobs:
           # We'll publish a single combined eval table in the collection job instead.
           GITHUB_STEP_SUMMARY: ''
         run: |
-          export GPU_COUNT=$((TP * PP_SIZE * PCP_SIZE))
+          pp_size="${PP_SIZE:-1}"
+          pcp_size="${PCP_SIZE:-1}"
+          export GPU_COUNT=$((TP * pp_size * pcp_size))
           echo "GPU_COUNT=${GPU_COUNT}" >> "$GITHUB_ENV"
 
           # Export RESULT_FILENAME early so it's available for artifact uploads even if cancelled
