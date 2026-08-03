@@ -42,6 +42,8 @@ def _identity(document: dict) -> tuple[str, str, str, str, str, int, str]:
 
 def _headline(document: dict) -> tuple[int | str, float | str, float | str]:
     rows = document["measurement"]["rows"]
+    if not rows:
+        return "n/a", "n/a", "n/a"
     row = next((item for item in rows if item["tokens_per_rank"] == 64), rows[len(rows) // 2])
     latency = row["components"]["roundtrip"]["percentiles_us"]
     return row["tokens_per_rank"], latency["p50"], latency["p99"]

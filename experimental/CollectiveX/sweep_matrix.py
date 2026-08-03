@@ -39,6 +39,10 @@ BACKEND_PRECISIONS = {
     # NCCL EP is BF16-only this release: its FP8 machinery exists upstream but RELEASE.md
     # lists it unsupported/untested, so no FP8 case is emitted (see bench/ep_nccl.py).
     "nccl-ep": ("bf16",),
+    # The TPU probe is BF16-only: it measures the interconnect collective itself
+    # (jax.lax.ragged_all_to_all) with no quantized dispatch path, so there is no FP8
+    # wire format to label (see bench/ep_jax.py).
+    "jax-ragged-a2a": ("bf16",),
 }
 # Short shard-ID slug per non-normal mode. Normal-mode shard IDs carry no mode
 # segment so existing references stay valid; a low-latency shard adds "-ll".
@@ -65,6 +69,10 @@ def _topology(platform: dict[str, Any], ep: int) -> dict[str, Any]:
     product = platform["product"]
     domain = platform["scale_up_domain"]
     scale_up = platform["scale_up_transport"]
+    # Scale-out fabric per SKU. Every GPU cluster here reaches other nodes over RDMA, so
+    # that stays the default; a SKU on a different fabric (TPU hosts talk over Google's
+    # DCN, not RDMA) declares its own rather than being mislabeled in the artifact.
+    scale_out_fabric = platform.get("scale_out_transport", "rdma")
     scale_out = ep > domain
     if scale_up == "mnnvl":
         scale_up_class = f"{product}-nvl{domain}-mnnvl"
@@ -78,9 +86,11 @@ def _topology(platform: dict[str, Any], ep: int) -> dict[str, Any]:
         "scale_up_domain": domain,
         "scope": "scale-out" if scale_out else "scale-up",
         "scale_up_transport": scale_up,
-        "scale_out_transport": "rdma" if scale_out else None,
-        "transport": f"{scale_up}-rdma" if scale_out else scale_up,
-        "topology_class": f"{product}-{scale_up}-rdma" if scale_out else scale_up_class,
+        "scale_out_transport": scale_out_fabric if scale_out else None,
+        "transport": f"{scale_up}-{scale_out_fabric}" if scale_out else scale_up,
+        "topology_class": (
+            f"{product}-{scale_up}-{scale_out_fabric}" if scale_out else scale_up_class
+        ),
     }
 
 

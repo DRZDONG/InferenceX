@@ -60,9 +60,21 @@ Matrix 在每次 dispatch 时生成，不存在冻结 digest 或锁定的 case c
 | H100/H200/B200/B300 | 1x8 NVLink，scale-up | 2x8 NVLink + RDMA，scale-out |
 | MI300X/MI325X/MI355X | 1x8 XGMI，scale-up | 2x8 XGMI + RDMA，scale-out |
 | GB200/GB300 | 2x4 MNNVL，scale-up | 4x4 MNNVL，scale-up |
+| TPU v7 (tpu7x) | 1x8 ICI，scale-up | unsupported coverage row —— 没有多主机 slice |
 
 物理 host 数量不决定 scope：两个 GB topology 都位于同一个 72-GPU MNNVL scale-up
 domain 内。
+
+TPU v7 的 EP16 被记录为 unsupported 而非实际执行，原因在于该池的**部署方式**，而不是硬件
+限制。`tpu7x` 的 ICI 是跨主机的 3D torus——[官方文档](https://docs.cloud.google.com/tpu/docs/tpu7x)
+列出的 topology 从 `2x2x1`（4 chip、1 主机）到 `2x2x2`（8 chip、2 主机）一直到 `8x16x16`，
+全部属于同一个 ICI fabric——因此多主机的 TPU EP cell 属于**基于 ICI 的 scale-up**，而不是
+scale-out。此处真正的阻碍是 `tpu-v7x` 被部署为六个*相互独立*的 `2x2x1` slice，因此这些主机
+之间没有共享 fabric。解决办法是使用更大的 slice（JobSet 加 `jax.distributed.initialize`，
+并相应提高 `scale_up_domain`），而不是换一种跨主机传输；`tpu-gke` launcher 在 `nodes > 1`
+时直接拒绝，而不是悄悄测量别的东西。该 SKU 上的 `scale_out_transport: dcn` 描述的是真正的
+scale-out 情形，即通过每 chip 100 Gbps 的数据中心网络进行*跨 slice* 通信，目前没有任何
+cell 使用它。
 
 | Backend | 当前范围 |
 |---|---|
@@ -70,6 +82,7 @@ domain 内。
 | MoRI | `normal` 模式在所有 CDNA SKU 上以直接 `IntraNode` kernel 执行 scale-up EP8，并为 2x8 XGMI + RDMA 的 EP16 固定使用 `InterNodeV1`。`low-latency` 模式选择 `IntraNodeLL` decode kernel，仅覆盖 decode/EP8。FP8 dispatch 由调用方预量化：gfx942 使用 per-SKU e4m3fnuz，gfx950 使用 e4m3fn；combine 保持 BF16（`quant_type=none`） |
 | UCCL-EP | [UCCL](https://github.com/uccl-project/uccl) EP 是 API 完全一致的 DeepEP 替代实现；其 CPU proxy 通过普通 `libibverbs` 发起 GPUDirect RDMA，不使用 NVSHMEM/IBGDA，并通过软件处理消息顺序、atomic 和 flow control。Scale-up 是单节点 `cudaIpc` over NVLink/XGMI，不使用 MNNVL。`normal` 模式使用旧版 `Buffer` `dispatch`/`combine`；`low-latency` 复用旧版低延迟 kernel，仅覆盖 decode/EP8。`normal` 模式的 FP8 dispatch 由调用方预量化；低延迟模式由 decode kernel 内部量化为 e4m3；combine 为 BF16。它在 NVIDIA 和 AMD 的 EP8 scale-up 上运行。EP16 虽可建立连接并通过轻量正确性用例，但重 token 数下超出统一的 per-case wall-clock budget，因此当前记为 unsupported coverage row |
 | NCCL EP | [NCCL EP](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_ep) 是 NVIDIA 基于 NCCL Device API 的原生 MoE dispatch/combine：节点内使用 LSA，节点间使用 GIN，并通过 `nccl4py` binding 驱动。`normal` 模式选择 `HIGH_THROUGHPUT` algorithm；低延迟 adapter 已实现但当前没有启用条目。此版本仅支持 BF16，且仅适用于 NVIDIA 和 CUDA 13。它在 H100/H200/B200/B300 上运行 EP8，在 GB200/GB300 上运行 EP8 和 EP16；GB EP16 仍处于 MNNVL scale-up domain 内。x86 EP16 scale-out 在 `nccl_ep.cc` 内发生 fault，因此记为 unsupported coverage row |
+| JAX ragged A2A（TPU probe） | 在覆盖单主机 ICI domain 的一维 device mesh 上执行 `jax.lax.ragged_all_to_all`，这正是 JAX 系 MoE 栈用于 EP dispatch/combine 的 primitive。仅支持 `normal` 模式与 BF16：probe 测量的是互连 collective 本身，因此没有可标注的量化 dispatch 路径。Dispatch 为 permute gather 加 ragged exchange；combine 为反向 exchange 加 fp32 scatter-add（unweighted rank-sum）。对于缺少 ragged primitive 的 JAX build，`--transport-impl padded` 会切换到固定容量的 `jax.lax.all_to_all`——它对生产路径的建模严格更差，绝不会被静默替换，并且会在 artifact 中标明。这一测量的含义与边界见 TPU Probe 一节 |
 
 DeepEP V2 指 [DeepEP PR #605](https://github.com/deepseek-ai/DeepEP/pull/605)
 引入的 `ElasticBuffer`，而不是更新版本的旧版 `Buffer` build。固定源代码来自
@@ -111,9 +124,14 @@ secret，因此没有本地文档时，SKU 完全使用 tracked baseline。
 architecture/product、vendor、accelerator runtime、container image 与 platform、
 固定 placement、launcher、可运行的 backend/EP pair、scale-out `fabric` identity
 （NIC 与 switch）、tracked operator default 和 scale-out RDMA selector。`vendor` 是
-任意规范化 metadata，不限于 AMD 或 NVIDIA；`runtime` 选择当前已实现的 CUDA 或 HIP
-执行路径。因此新增其他 vendor 不需要修改 vendor allowlist，但新的 runtime 或 collective
-实现仍需兼容的 backend 与 launcher。Operator 文档可以覆盖 default。Launcher 只声明并
+任意规范化 metadata，不限于 AMD 或 NVIDIA；`runtime` 选择执行路径，并且是一个封闭集合
+（`runtime/config.py` 中的 `ACCELERATOR_RUNTIMES`），因为它决定了一个 case 能使用哪个
+基准测试入口与哪一族 launcher：`cuda`/`hip` 运行 `bench/run_ep.py`（torch、NCCL/RCCL，
+每个 rank 一个进程），`tpu` 运行 `bench/run_ep_jax.py`（JAX、XLA collective，每台主机
+一个进程）。因此新增其他 vendor 不需要修改 vendor allowlist，但新的 runtime 或 collective
+实现仍需兼容的入口与 launcher。当 SKU 的跨主机 fabric 不是 RDMA 时，可选的
+`scale_out_transport` 字段用于声明它（TPU 主机使用 `dcn`），从而避免把 scale-out 条目
+标注成集群实际不具备的 fabric。Operator 文档可以覆盖 default。Launcher 只声明并
 检查自身真正需要的字段。`sweep_matrix.py` 从 placement 字段推导 EP topology；默认 sweep
 包含每个已注册 SKU。
 
@@ -155,6 +173,56 @@ Enroot 会按 image tag 和 image platform 将配置的 image 导入 per-run-sco
 DeepEP V2 source pin 位于 `runtime/common.sh`，其 build 会获取并验证固定 commit、检查
 `ElasticBuffer`，并缓存于按 architecture、image 与 commit 分键的 cluster-local build
 cache。只有固定的 `/cx-cache` mount 会进入 container。
+
+## TPU Probe
+
+TPU 路径是一个 probe，而不是 GPU backend 的对等实现；其差异都记录在 artifact 内，
+而不是留给读者自行推断。
+
+它运行在 GKE/ARC 的 `tpuv7` 池上，该池的 runner 是仅有 CPU 的 coordinator pod。这里没有
+Slurm、没有 enroot/pyxis、也没有共享文件系统，因此 `launchers/launch_tpu-gke.sh` 参照
+`runners/launch_tpuv7-gke.sh` 而非 `launch_single-slurm.sh`：它把 coordinator 上已固定
+的源码子树打包进一个 ConfigMap（约 120 KB，pod 内无需任何仓库凭据），为每个 shard 在
+`tpu7x` 节点上创建**一个** Kubernetes Job，在同一个 pod 内运行全部 case，使首个 case 之后
+的每个 case 都能复用节点本地的 XLA 编译缓存，并通过 pod log 取回结果 JSON。失败或部分完成
+的 leg 仍会上传它已经产出的内容。
+
+有三项性质刻意弱于 GPU 系列，且每一项都在 artifact 中标明：
+
+- `measurement.timing_source` 为 `host-wallclock-blocked...`。JAX 没有等价于
+  `torch.cuda.Event` 的公开接口，因此延迟是围绕 jit 程序 `block_until_ready` 的主机
+  wall-clock 时间，包含了 CUDA event 计时所排除的主机 dispatch 开销。在 tpu7x 上实测该开销
+  为**每次调用约 500 µs 的固定下限**——在 T=1 时约占读数的 98%，这使 ladder 的小 token
+  端失去意义。
+
+  因此该 probe 默认进行**摊销**：`--in-program-iters N`（默认取该 case 自身的 `--iters`，
+  使每个 trial 只有一次计时调用）在单个 jit 程序内串联 N 次相同操作，从而把该下限除以 N。
+  每次迭代的 carry 都经过 `jax.lax.optimization_barrier`：它保持数值不变，同时建立数据
+  依赖，阻止 XLA 把这 N 次调用做公共子表达式消除合并为一次——若缺少该依赖，串联会报出一个
+  虚假的快速数值，因此缺少该 barrier 的 JAX build 会直接失败而不是继续摊销。
+  `--in-program-iters 1` 可关闭摊销（在 runner 上通过 `COLLX_TPU_IN_PROGRAM_ITERS`）。
+
+  代价是统计性的，并且被记录而非隐藏：当 N > 1 时，每个样本是 N 次连续操作的**均值**，因此
+  `p99` 不再反映单次慢操作。`timing_source` 变为
+  `host-wallclock-blocked-amortized-xN`，`sampling.in_program_iterations` 记录 N，使消费方
+  无需阅读代码即可区分两者。摊销同时把主机调用次数除以 N（N=8 时每个 component 从 10,240 次
+  降到 1,280 次），这正是让 prefill ladder 保持在 wall-clock 预算内的原因。
+- `components.stage` 为 `unavailable`：permute 已融合进 dispatch，没有独立的 staging
+  pass 可计时。Per-destination layout（offset、size、gather index）在主机侧预先计算并排除
+  在计时区间之外，与 DeepEP layout pass 的处理方式一致；而设备上的 permute gather 与
+  combine 的 scatter-add **在**计时区间内，因为生产路径同样要付出这部分代价。
+- `implementation.oracle` 为 `probe-source-identity-and-exact-rank-sum`，比 GPU harness
+  的完整 per-expert transform oracle 更窄。它依然验证了真实性质：每个 dispatch 出去的副本
+  都会被解码回它所声称的 source token 并做逐位比较，其落位 offset 会与 exchange plan 校
+  验，combine 结果会与精确的期望 unweighted rank-sum 比较。由于 expert 取恒等映射，因此
+  不建模 per-expert transform。
+
+工作负载身份**与** GPU 系列共享：`bench/routing_np.py` 是 `bench/routing.py` 的 numpy
+移植并有 parity 测试（TPU 镜像没有可用的 torch），因此两个系列使用完全相同的 routing trace
+与完全相同的 activation 字节，并按同一个去重后的 (token, destination-rank) payload unit
+计费。`tests/test_tpu_probe.py` 在 torch 可导入时逐元素断言该 parity，不可导入时以 golden
+digest 固定；它还用纯 numpy 模拟整个 exchange plan，使 offset 或转置错误在本地即失败，而不
+是二十分钟后在 TPU 节点上才暴露。
 
 ## 本地检查
 

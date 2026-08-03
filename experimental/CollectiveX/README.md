@@ -65,9 +65,21 @@ frozen digest or locked case count.
 | H100/H200/B200/B300 | 1x8 NVLink, scale-up | 2x8 NVLink + RDMA, scale-out |
 | MI300X/MI325X/MI355X | 1x8 XGMI, scale-up | 2x8 XGMI + RDMA, scale-out |
 | GB200/GB300 | 2x4 MNNVL, scale-up | 4x4 MNNVL, scale-up |
+| TPU v7 (tpu7x) | 1x8 ICI, scale-up | unsupported coverage row — no multi-host slice |
 
 Physical host count does not determine scope: both GB topologies stay inside one 72-GPU MNNVL
 scale-up domain.
+
+TPU v7 EP16 is recorded as unsupported rather than attempted, and the reason is how the pool is
+PROVISIONED, not a limit of the hardware. `tpu7x`'s ICI is a 3D torus that spans hosts — the
+[documented](https://docs.cloud.google.com/tpu/docs/tpu7x) topologies go `2x2x1` (4 chips, 1 host)
+→ `2x2x2` (8 chips, 2 hosts) → up to `8x16x16`, all one ICI fabric — so a multi-host TPU EP cell
+would be **scale-up over ICI**, not scale-out. What blocks it here is that `tpu-v7x` is provisioned
+as six *independent* `2x2x1` slices, so these particular hosts have no shared fabric. The fix is a
+larger slice (a JobSet plus `jax.distributed.initialize`, and `scale_up_domain` raised to match),
+not a cross-host transport; the `tpu-gke` launcher refuses `nodes > 1` rather than quietly measuring
+something else. `scale_out_transport: dcn` on the SKU describes the genuinely-scale-out case,
+cross-*slice* traffic over the 100 Gbps-per-chip data-center network, which no cell uses today.
 
 | Backend | Current scope |
 |---|---|
@@ -75,6 +87,8 @@ scale-up domain.
 | MoRI | `normal` mode uses the direct `IntraNode` kernel for scale-up EP8 on every CDNA SKU and pins `InterNodeV1` for EP16 over 2x8 XGMI + RDMA. `low-latency` mode selects the `IntraNodeLL` decode kernel (single-call, pure-intranode, same compact layout and unweighted combine as `IntraNode`), decode/EP8 only. FP8 dispatch is caller-prequantized (per-SKU e4m3fnuz on gfx942, e4m3fn on gfx950); combine stays BF16 (`quant_type=none`) alongside BF16 dispatch |
 | UCCL-EP | [UCCL](https://github.com/uccl-project/uccl) EP: a drop-in, API-identical DeepEP replacement whose CPU proxies issue GPUDirect RDMA over plain `libibverbs` (no NVSHMEM/IBGDA), with software message ordering, atomics, and flow control; scale-up is single-node `cudaIpc` over NVLink/XGMI (never MNNVL). `normal` mode is the legacy `Buffer` `dispatch`/`combine` (unweighted rank-sum); `low-latency` reuses the legacy `low_latency_dispatch`/`low_latency_combine` decode kernels (weighted combine), decode/EP8 only. FP8 dispatch is caller-prequantized in `normal` mode (blockwise e4m3fn, per-SKU e4m3fnuz on gfx942); in `low-latency` mode the caller sends BF16 and the decode kernel quantizes to e4m3 internally (`use_fp8`). Combine is BF16. Runs on NVIDIA and AMD (H100/H200/B200 + MI300X/MI325X/MI355X), EP8 scale-up. Cross-node EP16 is functional (the internode RDMA path connects and the light case passes correctness) but its CPU-proxy throughput overruns the standardized per-case wall-clock budget on heavy token counts, so EP16 is an unsupported coverage row for now |
 | NCCL EP | [NCCL EP](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_ep): NVIDIA's native MoE dispatch/combine on the NCCL Device API — LSA (NVLink load/store) intra-node, GIN (GPU-Initiated Networking) inter-node — driven through the `nccl4py` bindings. `normal` mode selects the `HIGH_THROUGHPUT` algorithm (FLAT `[N, hidden]` receive, unweighted rank-sum combine); the `LOW_LATENCY` algorithm is implemented in the adapter but has no enabled cell (see the `ll_backends` note above). BF16 only: NCCL EP's FP8 machinery exists upstream but its RELEASE.md lists it unsupported/untested, so no FP8 case is emitted. NVIDIA-only and CUDA 13 only. EP8 scale-up on H100/H200/B200/B300 plus EP8 and EP16 on GB200/GB300, where EP16 stays inside the MNNVL scale-up domain. x86 EP16 scale-out is an unsupported coverage row: the cross-node GIN path faults inside `nccl_ep.cc` identically on RoCE and IB across four SKUs, a GDAKI limit rather than a fabric-selection one |
+
+| JAX ragged A2A (TPU probe) | `jax.lax.ragged_all_to_all` on a 1-D device mesh over one host's ICI domain — the primitive JAX MoE stacks use for EP dispatch/combine. `normal` mode and BF16 only: the probe measures the interconnect collective itself, so there is no quantized dispatch path to label. Dispatch is a permute gather plus the ragged exchange; combine is the reverse exchange plus an fp32 scatter-add (unweighted rank-sum). `--transport-impl padded` swaps in a fixed-capacity `jax.lax.all_to_all` for JAX builds without the ragged primitive — a strictly worse model of production, never substituted silently, and named in the artifact. See the TPU Probe section for what this measurement is and is not |
 
 DeepEP V2 means the `ElasticBuffer` implementation introduced by
 [DeepEP PR #605](https://github.com/deepseek-ai/DeepEP/pull/605), not a newer legacy `Buffer` build.
@@ -121,9 +135,14 @@ architecture/product, vendor, accelerator runtime, container image and platform,
 launcher, runnable backend/EP pairs, the scale-out `fabric` identity (NIC and switch — so same-GPU
 clusters on different fabrics are distinct entries, e.g. a second b200 cluster), tracked operator
 defaults, and scale-out RDMA selectors. `vendor` is arbitrary normalized metadata and is not
-restricted to AMD or NVIDIA; `runtime` selects the currently implemented CUDA or HIP execution
-path. Adding another vendor therefore does not require changing a vendor allowlist, although a new
-runtime or collective implementation still requires its own compatible backend and launcher.
+restricted to AMD or NVIDIA; `runtime` selects the execution path and is a closed set
+(`runtime/config.py`'s `ACCELERATOR_RUNTIMES`) because it decides which benchmark entrypoint and
+launcher family a case can use: `cuda`/`hip` run `bench/run_ep.py` (torch, NCCL/RCCL, one process per
+rank) and `tpu` runs `bench/run_ep_jax.py` (JAX, XLA collectives, one process per host). Adding
+another vendor therefore does not require changing a vendor allowlist, although a new
+runtime or collective implementation still requires its own compatible entrypoint and launcher.
+An optional `scale_out_transport` field names the SKU's cross-host fabric when it is not RDMA
+(TPU hosts use `dcn`), so a scale-out row is never labeled with a fabric the cluster does not have.
 Operator documents can override the defaults. Launchers
 declare and check the fields they actually require. `sweep_matrix.py` derives EP topology from the
 placement fields; the sweep includes every registered SKU by default.
@@ -168,6 +187,58 @@ per-SKU registry fields; the DeepEP V2 source pin lives in `runtime/common.sh` a
 fetched and verified at the pinned commit, checked for `ElasticBuffer`, and cached in a
 cluster-local build cache keyed by architecture, image, and commit. Only the fixed `/cx-cache` mount
 reaches the container.
+
+## TPU Probe
+
+The TPU path is a probe, not a peer of the GPU backends, and the differences are recorded in the
+artifact rather than left for a reader to infer.
+
+It runs on the GKE/ARC `tpuv7` pool, whose runner is a CPU-only coordinator pod. There is no Slurm,
+no enroot/pyxis, and no shared filesystem, so `launchers/launch_tpu-gke.sh` mirrors
+`runners/launch_tpuv7-gke.sh` instead of `launch_single-slurm.sh`: it packages the coordinator's
+already-pinned source subtree into a ConfigMap (~120 KB, no repository credential needed inside the
+pod), spawns ONE Kubernetes Job per shard onto a `tpu7x` node, runs every case in that one pod so
+each case after the first reuses the node-local XLA compile cache, and harvests the result JSONs back
+through the pod log. A red or partial leg still ships whatever it produced.
+
+Three properties are deliberately weaker than the GPU family's, and each is named in the artifact:
+
+- `measurement.timing_source` is `host-wallclock-blocked...`. There is no public JAX equivalent of
+  `torch.cuda.Event`, so latencies are host wall-clock around `block_until_ready` on a jitted
+  program and include host dispatch overhead the CUDA-event numbers exclude. Measured on tpu7x that
+  overhead is a **~500 µs floor per call** — at T=1 it was ~98% of the reading, which made the
+  small-token end of the ladder meaningless.
+
+  The probe therefore **amortizes** by default: `--in-program-iters N` (default: the case's own
+  `--iters`, so each trial is one timed call) chains N identical operations inside a single jitted
+  program, dividing the floor by N. Each iteration's carry passes through
+  `jax.lax.optimization_barrier`, which keeps the value unchanged while creating the data dependency
+  that stops XLA from common-subexpressioning the N calls into one — without it the chain would
+  report a fictitiously fast number, so a build lacking the barrier fails closed instead of
+  amortizing. `--in-program-iters 1` opts out (`COLLX_TPU_IN_PROGRAM_ITERS` on the runner).
+
+  The trade is statistical and is recorded, not hidden: with N > 1 each sample is the **mean** of N
+  consecutive operations, so `p99` no longer captures a single slow operation. `timing_source`
+  becomes `host-wallclock-blocked-amortized-xN` and `sampling.in_program_iterations` carries N, so a
+  consumer can tell the two apart without reading the code. Amortization also divides the host-call
+  count by N (10,240 → 1,280 calls per component at N=8), which is what keeps the prefill ladder
+  inside its wall-clock budget.
+- `components.stage` is `unavailable`: the permute is fused into dispatch, so there is no separate
+  staging pass to time. The per-destination layout (offsets, sizes, gather indices) is precomputed on
+  host and excluded from the timed region, the same treatment DeepEP's layout pass gets; the
+  on-device permute gather and the combine scatter-add ARE timed, because production pays them.
+- `implementation.oracle` is `probe-source-identity-and-exact-rank-sum`, narrower than the GPU
+  harness's full per-expert transform oracle. It still proves real things: every dispatched copy is
+  decoded back to the source token it claims to be and compared bit-for-bit, its landing offset is
+  checked against the exchange plan, and the combine is compared against the exact expected
+  unweighted rank-sum. The expert is the identity, so no per-expert transform is modelled.
+
+Workload identity IS shared with the GPU family: `bench/routing_np.py` is a parity-tested numpy port
+of `bench/routing.py` (the TPU image has no usable torch), so both families benchmark the identical
+routing trace and identical activation bytes, and both bill the same deduplicated (token,
+destination-rank) payload unit. `tests/test_tpu_probe.py` asserts that parity element-for-element
+whenever torch is importable and pins a golden digest when it is not, and it simulates the whole
+exchange plan in pure numpy so an offset or transpose error fails locally rather than on a TPU node.
 
 ## Local Checks
 

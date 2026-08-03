@@ -69,7 +69,7 @@ class PlatformRegistryTests(unittest.TestCase):
                     self.assertTrue(value)
                 self.assertRegex(entry["arch"], r"^[a-z0-9][a-z0-9._-]*$")
                 self.assertRegex(entry["vendor"], r"^[a-z0-9][a-z0-9._-]*$")
-                self.assertIn(entry["runtime"], {"cuda", "hip"})
+                self.assertIn(entry["runtime"], config.ACCELERATOR_RUNTIMES)
                 self.assertRegex(entry["image"], r"^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$")
                 self.assertIn(entry["image_platform"], {"linux/amd64", "linux/arm64"})
 

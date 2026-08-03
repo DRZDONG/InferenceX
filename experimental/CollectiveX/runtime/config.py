@@ -10,6 +10,14 @@ import re
 import sys
 
 
+# Accelerator runtimes a registered SKU may declare. `vendor` is already free-form (a
+# private runner names itself), but the runtime decides which BENCH ENTRYPOINT and which
+# launcher family a case can use, so it stays a closed set:
+#   cuda / hip -> bench/run_ep.py, torch + NCCL/RCCL, one process per rank
+#   tpu        -> bench/run_ep_jax.py, JAX + XLA collectives, one process per host
+# Adding a member here is only half the work; it needs an entrypoint and a launcher.
+ACCELERATOR_RUNTIMES = {"cuda", "hip", "tpu"}
+
 OPERATOR_FIELDS = {
     "partition", "account", "qos", "squash_dir", "stage_dir",
     "enroot_cache_path", "exclude_nodes", "nodelist", "lock_dir",
@@ -89,7 +97,7 @@ def operator_config(path: str, runner: str) -> None:
             not isinstance(vendor, str)
             or not vendor
             or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", vendor) is None
-            or runtime not in {"cuda", "hip"}
+            or runtime not in ACCELERATOR_RUNTIMES
         ):
             raise ValueError
         selected.update(
@@ -113,8 +121,8 @@ def case_count(path: str) -> None:
     print(len(load(path)["cases"]), end="")
 
 
-def _emit_argv(case: dict, version: object, runner: str, ts: str, index: int) -> None:
-    """Emit one null-delimited run_ep.py argv — the only case-to-invocation codec."""
+def _case_argv(case: dict, version: object, runner: str, ts: str, index: int) -> list[str]:
+    """Build one run_ep.py argv — the only case-to-invocation codec."""
     get = lambda key, default="": str(case.get(key) or default)
     argv = [
         "--backend", str(case["backend"]),
@@ -151,13 +159,13 @@ def _emit_argv(case: dict, version: object, runner: str, ts: str, index: int) ->
         f"_{ts}-c{index:03d}.json"
     )
     argv += ["--out", out]
-    sys.stdout.buffer.write(b"\0".join(part.encode() for part in argv) + b"\0")
+    return argv
 
 
-def case_args(
+def case_argv(
     path: str, index: int, runner: str, ts: str,
     ngpus: str, nodes: str, gpus_per_node: str, scale_up_domain: str,
-) -> None:
+) -> list[str]:
     document = load(path)
     cases = document["cases"]
     if not 0 <= index < len(cases):
@@ -170,7 +178,17 @@ def case_args(
     if placement != (ngpus, nodes, gpus_per_node, scale_up_domain):
         print(f"case placement {placement} differs from the allocation", file=sys.stderr)
         raise SystemExit(1)
-    _emit_argv(case, document["version"], runner, ts, index)
+    return _case_argv(case, document["version"], runner, ts, index)
+
+
+def case_args(
+    path: str, index: int, runner: str, ts: str,
+    ngpus: str, nodes: str, gpus_per_node: str, scale_up_domain: str,
+) -> None:
+    argv = case_argv(
+        path, index, runner, ts, ngpus, nodes, gpus_per_node, scale_up_domain,
+    )
+    sys.stdout.buffer.write(b"\0".join(part.encode() for part in argv) + b"\0")
 
 
 def main() -> None:

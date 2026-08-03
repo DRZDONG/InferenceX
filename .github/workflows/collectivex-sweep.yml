@@ -10,7 +10,7 @@ on:
         description: "EP library to sweep — 'all' runs every EP backend in one matrix"
         type: choice
         default: all
-        options: [all, deepep-v2, mori, uccl-ep, nccl-ep]
+        options: [all, deepep-v2, mori, uccl-ep, nccl-ep, jax-ragged-a2a]
       only_sku:
         description: Restrict to one GHA runner pool; blank = all
         type: string
@@ -23,6 +23,10 @@ on:
         description: Keep only shards whose expert-parallel degree is in this comma-list (8 keeps EP8 only, dropping EP16 so GB SKUs co-schedule with 8-GPU SKUs; blank = all)
         type: string
         default: ''
+      tpu_xprof:
+        description: "TPU only: also capture a profiler trace and publish device-side durations (the only latencies free of the host dispatch floor)"
+        type: boolean
+        default: false
       modes:
         description: "Keep only shards in this comma-list of modes (normal, low-latency); low-latency is a decode-only EP8 addition; blank = all"
         type: string
@@ -130,6 +134,7 @@ jobs:
       COLLX_SCALE_UP_DOMAIN: ${{ matrix.scale_up_domain }}
       COLLX_SHARD_FILE: .shards/${{ matrix.id }}.json
       COLLX_SHARD_SKU: ${{ matrix.sku }}
+      COLLX_TPU_XPROF: ${{ inputs.tpu_xprof && '1' || '0' }}
       COLLECTIVEX_CANONICAL_GHA: '1'
       COLLECTIVEX_SOURCE_SHA: ${{ github.sha }}
       # Consolidated shards run one bounded build-group in one Slurm allocation;
@@ -147,6 +152,10 @@ jobs:
         id: source
         env:
           COLLECTIVEX_REPOSITORY: ${{ github.repository }}
+          # Read-only, job-scoped, expires with the job. The fetch below runs with no
+          # system/global git config, no credential helper, and a fresh HOME, so a
+          # private repository has no other way to authenticate.
+          COLLECTIVEX_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ "${COLLX_JOB_ROOT%/*}" = "$COLLX_JOB_PARENT" ] \
@@ -172,9 +181,20 @@ jobs:
           trap 'rc=$?; if [ "$rc" != 0 ]; then rm -rf -- "$COLLX_JOB_ROOT"; [ "$COLLX_JOB_PARENT" = /tmp ] || rm -f -- "$COLLX_JOB_PARENT"; fi; exit "$rc"' EXIT
           mkdir -m 700 "$HOME" "$COLLX_JOB_ROOT/control" "$COLLX_JOB_ROOT/artifact" "$COLLX_SOURCE_ROOT"
           export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          # Authenticate the fetch. Written to the throwaway repo's LOCAL config, which
+          # lives inside the mode-0700 job root and is deleted with it, so the credential
+          # never reaches a shared config. Without it a private repo prompts for a
+          # username and dies with "could not read Username for 'https://github.com'".
+          # Same mechanism actions/checkout uses, which keeps the token out of the remote
+          # URL and so out of `git remote -v`, error text and logs. It is unset again
+          # immediately after the fetch below.
           if ! git init -q "$COLLX_SOURCE_ROOT" \
               || ! git -C "$COLLX_SOURCE_ROOT" remote add origin \
                 "https://github.com/${COLLECTIVEX_REPOSITORY}.git" \
+              || ! git -C "$COLLX_SOURCE_ROOT" config --local \
+                http."https://github.com/".extraheader \
+                "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$COLLECTIVEX_TOKEN" \
+                  | base64 -w0)" \
               || ! git -C "$COLLX_SOURCE_ROOT" -c credential.helper= -c protocol.version=2 \
                 fetch -q --no-tags --depth=1 origin "$COLLECTIVEX_SOURCE_SHA" \
               || ! git -C "$COLLX_SOURCE_ROOT" -c advice.detachedHead=false \
@@ -183,6 +203,14 @@ jobs:
             echo "CollectiveX source preparation failed" >&2
             exit 1
           fi
+          # Drop the credential now. Nothing after this point touches the network -- the
+          # checkout above resolves FETCH_HEAD locally -- so holding it for the rest of
+          # the job only widens the window in which it is readable on a persistent
+          # self-hosted runner. On the failure path the trap has already removed the
+          # whole job root; this covers the success path, where the root survives until
+          # the always() cleanup step at the end of the job.
+          git -C "$COLLX_SOURCE_ROOT" config --local --unset \
+            http."https://github.com/".extraheader || true
           echo 'prepared=true' >> "$GITHUB_OUTPUT"
           trap - EXIT
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
