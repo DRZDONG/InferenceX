@@ -315,7 +315,12 @@ jobs:
 
           export ${{ join(fromJson(inputs.prefill-additional-settings), ' ') }} ${{ join(fromJson(inputs.decode-additional-settings), ' ') }}
           export IS_MULTINODE=true
-          bash ./runners/launch_${RUNNER_NAME%%_*}.sh
+          if [[ "$RUNNER_TYPE" == "tpuv7" ]]; then
+            launcher="./runners/launch_tpuv7-disagg-gke.sh"
+          else
+            launcher="./runners/launch_${RUNNER_NAME%%_*}.sh"
+          fi
+          bash "$launcher"
           if [ "${{ inputs.eval-only }}" = "true" ]; then
             echo "Eval-only mode: skipping benchmark result file check"
             # Verify eval produced results
