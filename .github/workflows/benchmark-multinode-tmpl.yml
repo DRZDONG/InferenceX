@@ -295,6 +295,7 @@ jobs:
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          token: ${{ secrets.REPO_PAT || github.token }}
           fetch-depth: 0
           ref: ${{ inputs.ref || github.sha }}
           clean: true
@@ -303,6 +304,8 @@ jobs:
 
       - name: Launch multi-node job script
         env:
+          REPO_PAT: ${{ secrets.REPO_PAT || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RUNNER_NAME: ${{ runner.name }}
           RUNNER_TYPE: ${{ inputs.runner }}
           # Hash uniquely on all prefill/decode parallelism fields, worker counts, serving mode, concurrency, and runner.
