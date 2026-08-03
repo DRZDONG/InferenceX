@@ -260,10 +260,8 @@ jobs:
             done
           fi
 
-
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          token: ${{ startsWith(inputs.runner, 'tpu') && github.token || secrets.REPO_PAT }}
           fetch-depth: 0
           ref: ${{ inputs.ref || github.sha }}
           clean: true
@@ -274,16 +272,13 @@ jobs:
         env:
           RUNNER_NAME: ${{ runner.name }}
           RUNNER_TYPE: ${{ inputs.runner }}
-          REPO_PAT: ${{ startsWith(inputs.runner, 'tpu') && github.token || secrets.REPO_PAT }}
           # Hash uniquely on {EXP_NAME}_{PRECISION}_{FRAMEWORK}_tp{}-pp{}-dcp{}-pcp{}-ep{}-dpa{}_disagg-{}_spec-{}_conc{}_{runner}
           RESULT_FILENAME: ${{ env.EXP_NAME }}_${{ env.PRECISION }}_${{ env.FRAMEWORK }}_tp${{ env.TP }}-pp${{ env.PP_SIZE }}-dcp${{ env.DCP_SIZE }}-pcp${{ env.PCP_SIZE }}-ep${{ env.EP_SIZE }}-dpa${{ env.DP_ATTENTION }}_disagg-${{ env.DISAGG }}_spec-${{ env.SPEC_DECODING }}_conc${{ env.CONC }}_${{ runner.name }}
           # Suppress per-job eval markdown from being appended to the step summary.
           # We'll publish a single combined eval table in the collection job instead.
           GITHUB_STEP_SUMMARY: ''
         run: |
-          pp_size="${PP_SIZE:-1}"
-          pcp_size="${PCP_SIZE:-1}"
-          export GPU_COUNT=$((TP * pp_size * pcp_size))
+          export GPU_COUNT=$((TP * PP_SIZE * PCP_SIZE))
           echo "GPU_COUNT=${GPU_COUNT}" >> "$GITHUB_ENV"
 
           # Export RESULT_FILENAME early so it's available for artifact uploads even if cancelled
@@ -295,10 +290,12 @@ jobs:
           fi
 
           LAUNCHER=""
-          if [ "${RUNNER_TYPE}" = "tpuv7" ] && [ -f "./runners/launch_tpuv7-gke.sh" ]; then
-            LAUNCHER="./runners/launch_tpuv7-gke.sh"
-          elif [ "${RUNNER_TYPE}" = "tpu7x" ] && [ -f "./runners/launch_tpu7x-google.sh" ]; then
-            LAUNCHER="./runners/launch_tpu7x-google.sh"
+          if [ "${RUNNER_TYPE}" = "tpuv7" ] || [ "${RUNNER_TYPE}" = "tpu7x" ]; then
+            if [ -f "./runners/launch_tpu7x-google.sh" ]; then
+              LAUNCHER="./runners/launch_tpu7x-google.sh"
+            elif [ -f "./runners/launch_tpuv7-gke.sh" ]; then
+              LAUNCHER="./runners/launch_tpuv7-gke.sh"
+            fi
           fi
           if [ -z "$LAUNCHER" ] && [ -f "./runners/launch_${RUNNER_TYPE%%_*}.sh" ]; then
             LAUNCHER="./runners/launch_${RUNNER_TYPE%%_*}.sh"

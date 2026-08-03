@@ -189,7 +189,6 @@ jobs:
         id: run
         env:
           RUNNER_NAME: ${{ runner.name }}
-          RUNNER_TYPE: ${{ matrix.config.runner }}
           PROFILE: '1'
           SGLANG_TORCH_PROFILER_DIR: /workspace/
           VLLM_TORCH_PROFILER_DIR: /workspace/
@@ -204,12 +203,7 @@ jobs:
           export RESULT_FILENAME="${res_name}"
           echo "RESULT_FILENAME=${res_name}" >> "$GITHUB_ENV"
 
-          if [[ "$RUNNER_TYPE" == "tpuv7" ]]; then
-            launcher="./runners/launch_tpuv7-gke.sh"
-          else
-            launcher="./runners/launch_${RUNNER_NAME%%_*}.sh"
-          fi
-          bash "$launcher"
+          bash ./runners/launch_${RUNNER_NAME%%_*}.sh
 
           if [ ! -f "${res_name}.json" ]; then
             echo "Run failed: Benchmark result ${res_name}.json not found." >&2
