@@ -293,6 +293,11 @@ jobs:
             done
           fi
 
+      - name: Setup Git authentication for private repository
+        run: |
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' '${{ github.token }}' | base64 -w0)"
+          git config --global --add safe.directory "*"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -300,6 +305,7 @@ jobs:
           clean: true
           # TPU benchmarks do not use the agentic aiperf submodule.
           submodules: ${{ startsWith(inputs.runner, 'tpu') && 'false' || 'true' }}
+          persist-credentials: false
 
       - name: Launch multi-node job script
         env:
