@@ -60,7 +60,7 @@ TRACED_HLO = ("ragged-all-to-all",)
 # is `all-to-all`. Matching that inside the components would be ambiguous -- it is a
 # substring of `ragged-all-to-all` -- but the reference program contains no ragged op, so
 # there it is exact.
-REFERENCE_HLO = ("all-to-all",)
+REFERENCE_HLO = TRACED_HLO
 
 
 def transport_scope(component: str, tokens_per_rank: int) -> str:
@@ -74,6 +74,24 @@ def transport_scope(component: str, tokens_per_rank: int) -> str:
     transport. Nested scopes concatenate in the trace, so an event here matches both.
     """
     return f"{SCOPE_PREFIX}-xport-{component}-t{int(tokens_per_rank)}"
+
+
+def permute_scope(component: str, tokens_per_rank: int) -> str:
+    """Trace label wrapping ONLY the permute gather, a sibling of the transport scope.
+
+    The component's non-collective time was derived by SUBTRACTION (component minus
+    transport), on the reasoning that naming those ops is ambiguous. That reasoning broke
+    down: dispatch's transport scope reports 6,689us where combine's reports 9,973us for
+    the same collective moving the same bytes in the other direction, because XLA fuses
+    the collective's second op into whatever is adjacent and dispatch has a gather to fuse
+    into while combine does not. Subtraction then charges that op to the permute.
+
+    Scoping the permute explicitly turns the question into a measurement: whichever scope
+    the ~3,280us op lands in is the one it belongs to. The bare-collective reference
+    program, which has NO permute, emits an op of the same size -- so the expectation is
+    that it is collective work -- but expectation is what has been wrong five times here.
+    """
+    return f"{SCOPE_PREFIX}-permute-{component}-t{int(tokens_per_rank)}"
 
 
 def scope_name(component: str, tokens_per_rank: int) -> str:
@@ -284,8 +302,25 @@ class Point:
         def _dispatch_local(x_l, plan):
             index, in_off, send_sz, out_off, recv_sz, recv_off, _ = plan
             # Permute gather: stage this device's outgoing copies in destination order.
-            # Production pays this, so it stays inside the timed region.
-            staged = jnp.take(x_l, index, axis=0)
+            # Production pays this, so it stays inside the timed region -- but in its own
+            # scope, so what it costs is measured rather than inferred by subtraction.
+            with jax.named_scope(permute_scope("dispatch", layout.tokens_per_rank)):
+                staged = jnp.take(x_l, index, axis=0)
+            # EXPERIMENT: block fusion across the permute/collective boundary.
+            #
+            # dispatch's transport scope reports 6,685us where combine's reports 9,974us
+            # for the same collective, and the ragged bare-collective program -- which has
+            # no permute at all -- also emits the ~3,280us second op. So XLA appears to
+            # fuse that op into whatever is adjacent, and dispatch has a gather to fuse
+            # into. Both readings of dispatch's span add up, so the span cannot decide:
+            #     6,685 transport + 5,262 permute + 363 memset = 12,310
+            #     9,965 transport + 1,979 permute + 363 memset = 12,307
+            # The barrier decides it. If the fusion is metadata-only, transport_us rises
+            # to ~9,970, permute_us falls to ~1,980, and the SPAN IS UNCHANGED. If the
+            # span rises instead, the fusion was real work and the op belongs to the
+            # gather -- in which case this barrier must be reverted, because it would be
+            # measurement perturbing the thing measured.
+            staged = jax.lax.optimization_barrier(staged)
             out = jnp.zeros((max_recv, hidden), dtype=x_l.dtype)
             with jax.named_scope(transport_scope("dispatch", layout.tokens_per_rank)):
                 return jax.lax.ragged_all_to_all(
@@ -373,52 +408,40 @@ class Point:
             return self._reference
         jax, jnp = self._jax, self._jnp
         axis, hidden = self.t.axis, self.t.hidden
-        ep_size = self.t.ep_size
-
-        # The dense chunk: every (src, dst) pair pads to the largest, as all_to_all
-        # requires equal splits. Built ONCE here, outside anything timed.
-        chunk = max(1, int(self.layout.send_sizes.max()))
-        rows = ep_size * chunk
-        max_send = max(1, self.layout.max_send)
-
-        def _fit(g):
-            if max_send >= rows:
-                return g[:rows]
-            return jnp.pad(g, ((0, rows - max_send), (0, 0)))
-
-        # Operand staged 3D as (ep, chunk, hidden) per shard -- the shape upstream passes
-        # (AllToAllBenchmark uses (dim, _BASE_N, _BASE_K)), with tiled=True as upstream
-        # does. split_axis=0 then has exactly the axis size, so the split is one slice per
-        # device and no local rearrangement is needed.
+        max_recv = max(1, self.layout.max_recv)
+        # RAGGED, the same collective the probe measures. The reference is the upstream
+        # measurement METHOD -- per-call host timing loop, IQR filter, per-device egress
+        # convention -- applied to the collective under test. Timing a DENSE all_to_all
+        # instead was faithful to AllToAllBenchmark's program but benchmarked a different
+        # primitive, which makes it uncomparable to dispatch.transport_us: dense ran ~11%
+        # cheaper per byte and 2% heavier in bytes, so the two could not be reconciled.
         #
-        # A 2D (ep*chunk, hidden) operand cost two extra ops -- 897.7us and 900.5us at
-        # T=8192, bracketing the 6,962us exchange -- because the split axis had to be
-        # carved out of the leading dimension and folded back. A matched pre/post pair at
-        # ~13% each is a reshape signature, not transfer, and staging 3D removed both
-        # (span 8,760us -> 7,416us). The reshape happens once here, outside the timed
-        # region.
+        # Everything that made the ragged version wrong before is gone: the operand is
+        # staged 2D so no `[0]` squeeze copies it per call, and the result is returned 2D
+        # so no `[None]` re-materialises it. What remains inside the scope is the
+        # collective and its ~363us output memset, which the reference implementation
+        # also pays.
         staged = self.t._mapped(
-            lambda x_g, index_g: _fit(
-                jnp.take(x_g[0], index_g[0], axis=0)
-            ).reshape(ep_size, chunk, hidden),
+            lambda x_g, index_g: jnp.take(x_g[0], index_g[0], axis=0),
             (True, True), True,
         )(self.x, self.send_index)
         staged = jax.block_until_ready(staged)
 
-        def transport(send_g):
+        def transport(staged_g, in_off_g, send_sz_g, out_off_g, recv_sz_g):
             with jax.named_scope(REFERENCE_MARKER):
-                return jax.lax.all_to_all(
-                    send_g, axis_name=axis, split_axis=0, concat_axis=0, tiled=True,
+                out = jnp.zeros((max_recv, hidden), dtype=staged_g.dtype)
+                return jax.lax.ragged_all_to_all(
+                    staged_g, out, in_off_g[0], send_sz_g[0], out_off_g[0],
+                    recv_sz_g[0], axis_name=axis,
                 )
 
-        program = self.t._mapped(transport, (True,), True)
+        program = self.t._mapped(transport, (True,) * 5, True)
+        plan = (self.input_offsets, self.send_sizes,
+                self.output_offsets, self.recv_sizes)
 
         def call():
-            return program(staged)
+            return program(staged, *plan)
 
-        self.reference_chunk_rows = chunk
-        self.reference_egress_bytes = float(chunk * (ep_size - 1) * hidden
-                                            * self.t.dispatch_value_bytes)
         self._reference = (call, staged)
         return self._reference
 
