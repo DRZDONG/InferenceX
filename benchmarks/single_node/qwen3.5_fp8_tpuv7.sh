@@ -41,13 +41,7 @@ export MIN_TOKEN_BUCKET="${MIN_TOKEN_BUCKET:-8}"
 export VLLM_MOE_CHUNK_SIZE="${VLLM_MOE_CHUNK_SIZE:-256}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false}"
 export TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL="${TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL:-0}"
-export MOE_LOCAL_EXPERT_AFFINITY_EPSILON="${MOE_LOCAL_EXPERT_AFFINITY_EPSILON:-0.01}"
-export VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-0}"
-export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-3}"
-export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
 export TPU_VMODULE="${TPU_VMODULE:-tpu_pjrt_client=1,pjrt_stream_executor_client=1,tpu_pjrt_compiler_utils=1}"
-export TPU_STDERR_LOG_LEVEL="${TPU_STDERR_LOG_LEVEL:-0}"
-export VLLM_TORCH_PROFILER_DIR="${VLLM_TORCH_PROFILER_DIR:-/dev/shm/xprof}"
 export MODEL_IMPL_TYPE="vllm"
 export TPU_BACKEND_TYPE="jax"
 export PJRT_DEVICE="TPU"
@@ -110,7 +104,6 @@ vllm serve "$MODEL" --host 0.0.0.0 --port "$PORT" \
     --language-model-only \
     --attention-backend CUSTOM \
     --block-size=${BLOCK_SIZE:-256} \
-    --default-chat-template-kwargs '{"enable_thinking":false}' \
     ${EXTRA_SERVE_ARGS:-} \
     > "$SERVER_LOG" 2>&1 &
 
