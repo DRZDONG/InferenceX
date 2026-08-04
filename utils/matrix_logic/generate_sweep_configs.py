@@ -423,17 +423,10 @@ def generate_full_sweep(args, all_config_data, runner_data):
                             continue  # Skip if no values meet the min_conc requirement
 
                     # Apply max-conc filter if specified
-                    # If max_conc is less than all values, use max_conc directly (if valid)
                     if args.max_conc is not None:
-                        filtered_conc = [c for c in conc_values if c <= args.max_conc]
-                        if not filtered_conc:
-                            # No existing values <= max_conc, so use max_conc directly if valid
-                            if args.max_conc > 0:
-                                conc_values = [args.max_conc]
-                            else:
-                                continue  # Skip if max_conc is not positive
-                        else:
-                            conc_values = filtered_conc
+                        conc_values = [c for c in conc_values if c <= args.max_conc]
+                        if not conc_values:
+                            continue  # Skip if no values meet the max_conc requirement
 
                     seq_len_str = seq_len_to_str(isl, osl)
                     runners_for_entry = runner_nodes_to_use if runner_nodes_to_use else [runner]
@@ -501,15 +494,12 @@ def generate_full_sweep(args, all_config_data, runner_data):
                         if args.max_conc is not None:
                             if args.max_conc <= 0:
                                 continue
-                            filtered_conc = [
+                            conc_values = [
                                 conc for conc in conc_values
                                 if conc <= args.max_conc
                             ]
-                            conc_values = (
-                                filtered_conc
-                                if filtered_conc
-                                else [args.max_conc]
-                            )
+                            if not conc_values:
+                                continue
                     else:
                         conc_start = bmk[Fields.CONC_START.value]
                         conc_end = bmk[Fields.CONC_END.value]
@@ -522,15 +512,13 @@ def generate_full_sweep(args, all_config_data, runner_data):
                                 continue
                             conc_start = max(conc_start, args.min_conc)
 
-                        # If conc_start > max_conc, use max_conc directly.
+                        # If conc_start > max_conc, skip this config entirely.
                         if args.max_conc is not None:
                             if args.max_conc <= 0:
                                 continue
                             if conc_start > args.max_conc:
-                                conc_start = args.max_conc
-                                conc_end = args.max_conc
-                            else:
-                                conc_end = min(conc_end, args.max_conc)
+                                continue
+                            conc_end = min(conc_end, args.max_conc)
 
                         conc_values = []
                         conc = conc_start
