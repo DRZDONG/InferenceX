@@ -136,17 +136,23 @@ else:
 
     single_node_env = get_required_env_vars(['TP', 'EP_SIZE', 'DP_ATTENTION'])
     tp_size = int(single_node_env['TP'])
+    dp_size = int(os.environ.get('DP') or '1')
+    if dp_size <= 0:
+        raise ValueError("DP must be a positive integer.")
     ep_size = int(single_node_env['EP_SIZE'])
     dp_attention = single_node_env['DP_ATTENTION']
+    logical_devices = tp_size * dp_size
+    num_gpus = max(1, (logical_devices + chip_divisor - 1) // chip_divisor)
 
     single_node_data = {
         'is_multinode': False,
         'tp': tp_size,
         'ep': ep_size,
         'dp_attention': dp_attention,
-        'tput_per_gpu': total_token_throughput / (tp_size / chip_divisor),
-        'output_tput_per_gpu': output_throughput / (tp_size / chip_divisor),
-        'input_tput_per_gpu': (total_token_throughput - output_throughput) / (tp_size / chip_divisor),
+        'num_gpus': num_gpus,
+        'tput_per_gpu': total_token_throughput / num_gpus,
+        'output_tput_per_gpu': output_throughput / num_gpus,
+        'input_tput_per_gpu': (total_token_throughput - output_throughput) / num_gpus,
     }
 
     data = data | single_node_data
