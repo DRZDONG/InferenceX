@@ -823,14 +823,15 @@ class HostTimingTests(unittest.TestCase):
 
         marker, inner = run_ep_jax.traced_markers(run_ep_jax.REFERENCE, 8192)
         self.assertEqual(marker, run_ep_jax.ep_jax.REFERENCE_MARKER)
-        # The reference is DENSE all_to_all, so its HLO is `all-to-all`, NOT the
-        # components' `ragged-all-to-all`. Using the components' marker here would match
-        # nothing and silently drop the reference's transport breakdown.
+        # The reference times the SAME ragged collective the components do -- that is
+        # what makes it comparable to dispatch.transport_us at all. A dense all_to_all
+        # reference was tried and could not be reconciled: different primitive, ~11%
+        # cheaper per byte on 2% more bytes.
         self.assertEqual(run_ep_jax.transport_key(run_ep_jax.REFERENCE, 8192),
                          run_ep_jax.ep_jax.REFERENCE_HLO[0])
         self.assertIn(run_ep_jax.ep_jax.REFERENCE_HLO[0], inner)
-        self.assertNotEqual(run_ep_jax.ep_jax.REFERENCE_HLO[0],
-                            run_ep_jax.ep_jax.TRACED_HLO[0])
+        self.assertEqual(run_ep_jax.ep_jax.REFERENCE_HLO,
+                         run_ep_jax.ep_jax.TRACED_HLO)
 
         marker, inner = run_ep_jax.traced_markers("dispatch", 8192)
         self.assertEqual(marker, run_ep_jax.ep_jax.scope_name("dispatch", 8192))
@@ -882,6 +883,56 @@ class HostTimingTests(unittest.TestCase):
         self.assertNotEqual(run_ep_jax.timing_source(True),
                             run_ep_jax.timing_source(False))
 
+
+
+class PermuteScopeTests(unittest.TestCase):
+    """The permute is scoped, so its cost is measured rather than left to subtraction.
+
+    `non_transport_us` was derived as component-minus-transport. That silently charged the
+    permute for whatever the transport scope missed -- and dispatch's scope reports
+    6,689us where combine's reports 9,973us for the same collective, because XLA fuses the
+    collective's second op into an adjacent gather that only dispatch has.
+    """
+
+    def test_permute_and_transport_are_distinct_sibling_scopes(self) -> None:
+        permute = ep_jax.permute_scope("dispatch", 8192)
+        transport = ep_jax.transport_scope("dispatch", 8192)
+        self.assertNotEqual(permute, transport)
+        # Neither may be a substring of the other, or marker_in would match both and the
+        # two costs would pool -- the same defect that once made four HLO rows duplicate.
+        self.assertNotIn(permute, transport)
+        self.assertNotIn(transport, permute)
+        self.assertTrue(permute.startswith(ep_jax.SCOPE_PREFIX))
+
+    def test_the_permute_scope_is_traced_for_components(self) -> None:
+        _, inner = run_ep_jax.traced_markers("dispatch", 8192)
+        self.assertIn(ep_jax.permute_scope("dispatch", 8192), inner)
+        self.assertIn(ep_jax.transport_scope("dispatch", 8192), inner)
+        # The reference program has no permute, so it must not claim one.
+        _, reference_inner = run_ep_jax.traced_markers(run_ep_jax.REFERENCE, 8192)
+        self.assertNotIn(ep_jax.permute_scope(run_ep_jax.REFERENCE, 8192), reference_inner)
+
+    def test_the_permute_is_scoped_inside_dispatch(self) -> None:
+        """The gather must actually be wrapped, not just the helper exist."""
+        scopes = []
+        stub = _stub_jax()
+        stub.named_scope = lambda name: _recording_scope(scopes, name)
+        transport = ep_jax.JaxEPTransport.__new__(ep_jax.JaxEPTransport)
+        transport.jax, transport.jnp = stub, stub.numpy
+        transport.mesh, transport.ep_size, transport.hidden = object(), 4, 64
+        transport.axis = "ep"
+        transport._P = stub.sharding.PartitionSpec
+        transport.shard_map = lambda fn, **kwargs: fn
+        _, layout = _layout()
+        point = ep_jax.Point(
+            transport=transport, layout=layout, x=stub.array(),
+            send_index=stub.array(), input_offsets=stub.array(),
+            send_sizes=stub.array(), output_offsets=stub.array(),
+            recv_sizes=stub.array(), recv_offsets=stub.array(),
+            return_offsets=stub.array(),
+        )
+        point.dispatch()
+        self.assertIn(ep_jax.permute_scope("dispatch", layout.tokens_per_rank), scopes)
 
 
 class ByRankTests(unittest.TestCase):
@@ -1546,6 +1597,12 @@ class XprofParserTests(unittest.TestCase):
         percentiles = xprof.summarize([10.0, 20.0, 30.0, 40.0])
         self.assertEqual(sorted(percentiles), ["p50", "p90", "p95", "p99"])
         self.assertEqual(percentiles["p50"], ep_harness.percentile([10, 20, 30, 40], 50))
+
+
+@contextlib.contextmanager
+def _recording_scope(sink, name):
+    sink.append(name)
+    yield
 
 
 def _stub_jax():

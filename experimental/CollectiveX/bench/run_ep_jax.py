@@ -67,7 +67,8 @@ def traced_markers(component: str, tokens_per_rank: int):
     if component == REFERENCE:
         return ep_jax.REFERENCE_MARKER, ep_jax.REFERENCE_HLO
     return (ep_jax.scope_name(component, tokens_per_rank),
-            (ep_jax.transport_scope(component, tokens_per_rank),) + ep_jax.TRACED_HLO)
+            (ep_jax.transport_scope(component, tokens_per_rank),
+             ep_jax.permute_scope(component, tokens_per_rank)) + ep_jax.TRACED_HLO)
 
 
 def transport_key(component: str, tokens_per_rank: int) -> str:
@@ -708,6 +709,13 @@ def main() -> int:
             if total is not None and transport is not None:
                 parsed["transport_us"] = transport
                 parsed["non_transport_us"] = total - transport
+            # Measured directly, where the scope exists, so `non_transport_us` can be
+            # checked against it instead of standing in for it.
+            permute = ((parsed.get("by_hlo") or {})
+                       .get(ep_jax.permute_scope(name, tokens), {})
+                       .get("per_iteration_us"))
+            if permute is not None:
+                parsed["permute_us"] = permute
         device_timing[tokens] = parsed_point
         summary = " ".join(
             f"{name}={parsed['percentiles_us']['p50']:.1f}"
