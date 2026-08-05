@@ -33,7 +33,7 @@ jobs:
             const commentId = String(payload['comment-id'] ?? '');
             const succeeded = String(payload['stage-succeeded'] ?? '');
 
-            if (payload['source-repository'] !== 'SemiAnalysisAI/InferenceX-app') {
+            if (payload['source-repository'] !== 'SemiAnalysisAI/InferenceX-app-Private-TPU') {
               core.setFailed('Unsupported staging callback source');
               return;
             }
@@ -58,7 +58,7 @@ jobs:
               return;
             }
 
-            const appRunUrl = `${context.serverUrl}/SemiAnalysisAI/InferenceX-app/actions/runs/${appRunId}`;
+            const appRunUrl = `${context.serverUrl}/SemiAnalysisAI/InferenceX-app-Private-TPU/actions/runs/${appRunId}`;
             const stagingSite = 'https://inferencemax-app-git-staging-semianalysisai.vercel.app';
             const entry = encodeURIComponent(`${runDate}~r${runId}`);
             const chartUrl = `${stagingSite}/inference?i_dates=${entry}`;

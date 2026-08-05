@@ -454,23 +454,23 @@ The push-to-main `Run Sweep` must:
 - run `trigger-ingest`.
 
 Then locate the resulting `repository_dispatch` run in
-`SemiAnalysisAI/InferenceX-app`. In the forgotten-`/reuse` case the target's
+`SemiAnalysisAI/InferenceX-app-Private-TPU`. In the forgotten-`/reuse` case the target's
 bogus ingest is also a recent successful `ingest-results` run, so do not pick by
 recency — pick the run whose `Download artifacts from InferenceX run` step logs
 `RUN_ID: <RECOVERY_RUN_ID>`:
 
 ```bash
-gh run list --repo SemiAnalysisAI/InferenceX-app \
+gh run list --repo SemiAnalysisAI/InferenceX-app-Private-TPU \
   --workflow "Ingest Benchmark Results" \
   --event repository_dispatch --limit 10 \
   --json databaseId,status,conclusion,createdAt
 
 INGEST_RUN_ID=<candidate-run-id>
-gh run view "$INGEST_RUN_ID" --repo SemiAnalysisAI/InferenceX-app --log \
+gh run view "$INGEST_RUN_ID" --repo SemiAnalysisAI/InferenceX-app-Private-TPU --log \
   | grep -m1 "RUN_ID: $RECOVERY_RUN_ID"   # must match before you trust this run
 
 gh run watch "$INGEST_RUN_ID" \
-  --repo SemiAnalysisAI/InferenceX-app --exit-status
+  --repo SemiAnalysisAI/InferenceX-app-Private-TPU --exit-status
 ```
 
 The ingest's first step is a `sleep 300` "wait for source run to finish", so the
