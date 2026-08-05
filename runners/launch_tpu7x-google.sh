@@ -151,7 +151,7 @@ metadata:
   name: ${JOB}
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 7200
+  ttlSecondsAfterFinished: 1800
   template:
     spec:
       restartPolicy: Never
