@@ -72,7 +72,7 @@ spec:
                       print(f"[janitor] err: {e}", flush=True)
                   time.sleep(IV)
           resources:
-            requests: { cpu: "50m", memory: 64Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: "50m", memory: "256Mi" }
+            limits: { cpu: "50m", memory: "256Mi" }
           volumeMounts:
             - { name: tpu-cache, mountPath: /host-cache }
