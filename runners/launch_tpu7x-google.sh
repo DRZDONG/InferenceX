@@ -18,7 +18,7 @@ NS="${TPU_BENCH_NAMESPACE:-${NAMESPACE:-arc-runners}}"
 # models baked into it ($RO_CACHE_MODELS); any other config falls back to a per-job CoW
 # clone of $SNAP (RWO, roomy writable disk for online download). Set TPU_CACHE_RO_PVC=""
 # to force the clone path.
-RO_PVC="${TPU_CACHE_RO_PVC:-}"
+RO_PVC="${TPU_CACHE_RO_PVC-qwen-cache-ro}"
 RO_CACHE_MODELS="${TPU_RO_CACHE_MODELS:-Qwen/Qwen3.5-397B-A17B-FP8}"
 SNAP="${TPU_CACHE_SNAPSHOT:-qwen-cache-snap}"           # golden VolumeSnapshot (fallback clone source; matches runners/k8s/v7/)
 CACHE_SC="${TPU_CACHE_STORAGECLASS:-hyperdisk-balanced-sc}"
@@ -209,13 +209,6 @@ ${INIT_CONTAINERS}
 ${CACHE_MOUNT}
 ${CONFIGMAP_MOUNTS}
 EOF
-
-if [ -n "${CACHE_PVC:-}" ]; then
-  JOB_UID=$($KUBECTL -n "$NS" get job "${JOB}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
-  if [ -n "$JOB_UID" ]; then
-    $KUBECTL -n "$NS" patch pvc "${CACHE_PVC}" -p '{"metadata":{"ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"'"${JOB}"'","uid":"'"${JOB_UID}"'","blockOwnerDeletion":true}]}}' >/dev/null 2>&1 || true
-  fi
-fi
 
 if [ -z "$REPO_PAT" ]; then
   echo "[gke] waiting for init container to start for local workspace injection..."
