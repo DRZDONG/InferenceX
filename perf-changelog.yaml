@@ -5318,4 +5318,4 @@
     - "Update vLLM image to us-central1-docker.pkg.dev/ironwood-496417/torchtpu-vllm/torchtpu-vllm-prod:latest"
     - "Optimize batching and max-num-seqs scaling based on TP vs DP size on TPU v7"
     - "Dynamically calculate max-num-batched-tokens based on ISL and DP size"
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/XXX
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/999
