@@ -99,7 +99,7 @@ done
 
 # Cache wiring
 USE_RO=""
-if [ -n "$RO_PVC" ]; then for _m in $RO_CACHE_MODELS; do [ "$_m" = "${MODEL:-}" ] && USE_RO=1; done; fi
+if [ -n "$RO_PVC" ] && $KUBECTL -n "$NS" get pvc "$RO_PVC" >/dev/null 2>&1; then for _m in $RO_CACHE_MODELS; do [ "$_m" = "${MODEL:-}" ] && USE_RO=1; done; fi
 
 if [ -n "$USE_RO" ]; then
   CACHE_VOL=$'        - name: model-cache\n          persistentVolumeClaim:\n            claimName: '"${RO_PVC}"$'\n            readOnly: true'
