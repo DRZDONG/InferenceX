@@ -40,14 +40,14 @@ spec:
         - name: janitor
           image: python:3.12-slim
           env:
-            - { name: HIGH_PCT, value: "78" }
-            - { name: LOW_PCT, value: "60" }
+            - { name: HIGH_PCT, value: "65" }
+            - { name: LOW_PCT, value: "45" }
             - { name: INTERVAL, value: "60" }
           command: ["python3", "-u", "-c"]
           args:
             - |
               import os, shutil, time
-              CACHE="/host-cache"; JAX=os.path.join(CACHE,"jax_compilation_cache")
+              CACHE="/host-cache"
               HIGH=int(os.environ["HIGH_PCT"]); LOW=int(os.environ["LOW_PCT"]); IV=int(os.environ["INTERVAL"])
               def used():
                   s=os.statvfs(CACHE); return 100*(s.f_blocks-s.f_bfree)//s.f_blocks
@@ -55,21 +55,24 @@ spec:
               while True:
                   try:
                       u=used()
-                      if u>=HIGH and os.path.isdir(JAX):
-                          ents=[os.path.join(JAX,e) for e in os.listdir(JAX)]
-                          ents.sort(key=lambda p: os.path.getmtime(p))  # oldest first
-                          for p in ents:
+                      if u>=HIGH and os.path.isdir(CACHE):
+                          ents=[]
+                          for root, dirs, files in os.walk(CACHE):
+                              for f in files:
+                                  p=os.path.join(root,f)
+                                  try: ents.append((os.path.getmtime(p), p))
+                                  except OSError: pass
+                          ents.sort()  # oldest first
+                          for _, p in ents:
                               if used()<LOW: break
-                              try:
-                                  shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
-                              except OSError:
-                                  pass
+                              try: os.remove(p)
+                              except OSError: pass
                           print(f"[janitor] pruned {u}% -> {used()}%", flush=True)
                   except Exception as e:
                       print(f"[janitor] err: {e}", flush=True)
                   time.sleep(IV)
           resources:
-            requests: { cpu: "50m", memory: 64Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: "50m", memory: "256Mi" }
+            limits: { cpu: "50m", memory: "256Mi" }
           volumeMounts:
             - { name: tpu-cache, mountPath: /host-cache }

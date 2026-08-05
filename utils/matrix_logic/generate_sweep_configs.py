@@ -465,6 +465,8 @@ def generate_full_sweep(args, all_config_data, runner_data):
                     tp = bmk[Fields.TP.value]
                     ep = bmk.get(Fields.EP.value)
                     dp_attn = bmk.get(Fields.DP_ATTN.value)
+                    dp = bmk.get(Fields.DP.value)
+                    additional_settings = bmk.get(Fields.ADDITIONAL_SETTINGS.value)
                     spec_decoding = bmk.get(Fields.SPEC_DECODING.value, "none")
 
                     # Apply max-tp filter if specified
@@ -569,6 +571,10 @@ def generate_full_sweep(args, all_config_data, runner_data):
                                 entry[Fields.EP.value] = ep
                             if dp_attn is not None:
                                 entry[Fields.DP_ATTN.value] = dp_attn
+                            if dp is not None:
+                                entry[Fields.DP.value] = dp
+                            if additional_settings is not None:
+                                entry[Fields.ADDITIONAL_SETTINGS.value] = additional_settings
 
                             validate_matrix_entry(entry, is_multinode)
                             matrix_values.append(entry)
@@ -802,7 +808,9 @@ def generate_test_config_sweep(args, all_config_data, runner_data=None):
                     # Single-node config
                     tp = bmk[Fields.TP.value]
                     ep = bmk.get(Fields.EP.value)
+                    dp = bmk.get(Fields.DP.value)
                     dp_attn = bmk.get(Fields.DP_ATTN.value)
+                    additional_settings = bmk.get(Fields.ADDITIONAL_SETTINGS.value)
                     spec_decoding = bmk.get(Fields.SPEC_DECODING.value, "none")
 
                     # Get concurrency values
@@ -849,6 +857,10 @@ def generate_test_config_sweep(args, all_config_data, runner_data=None):
                                 Fields.DISAGG.value: disagg,
                                 Fields.RUN_EVAL.value: False,
                             }
+                            if dp is not None:
+                                entry[Fields.DP.value] = dp
+                            if additional_settings:
+                                entry[Fields.ADDITIONAL_SETTINGS.value] = additional_settings
                             matrix_values.append(validate_matrix_entry(entry, is_multinode=False))
 
         # ---- Agentic-coding scenarios ----

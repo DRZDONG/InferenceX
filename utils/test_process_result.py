@@ -243,14 +243,17 @@ class TestProcessResultScript:
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / 8)  # decode gpus
         assert output_data["input_tput_per_gpu"] == pytest.approx((15000.5 - 12000.0) / 20)  # prefill gpus
 
-    def test_tpuv7_single_node_per_physical_chip(self, tmp_path, sample_benchmark_result, base_env_vars):
-        """TPU v7 exposes 2 logical devices/chip, so single-node tput is per physical chip (TP/2)."""
+    def test_tpuv7_single_node_counts_data_parallel_cores(
+        self, tmp_path, sample_benchmark_result, base_env_vars
+    ):
+        """TPU v7 exposes two logical devices per chip across TP and DP."""
         env = {
             **base_env_vars,
             "RUNNER_TYPE": "tpuv7",
             "FRAMEWORK": "vllm",
             "DISAGG": "false",
-            "TP": "8",
+            "TP": "1",
+            "DP": "8",
             "EP_SIZE": "1",
             "DP_ATTENTION": "false",
         }
@@ -258,7 +261,8 @@ class TestProcessResultScript:
         assert result.returncode == 0, f"Script failed: {result.stderr}"
         output_data = json.loads(result.stdout)
 
-        chips = 8 / 2  # TP=8 logical devices -> 4 physical v7 chips
+        chips = 4  # TP=1 × DP=8 logical devices / 2 cores per physical chip
+        assert output_data["num_gpus"] == chips
         assert output_data["tput_per_gpu"] == pytest.approx(15000.5 / chips)
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / chips)
         assert output_data["input_tput_per_gpu"] == pytest.approx((15000.5 - 12000.0) / chips)

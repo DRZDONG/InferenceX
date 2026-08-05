@@ -26,6 +26,8 @@ class Fields(Enum):
     HARDWARE = 'hardware'
     SCENARIOS = 'scenarios'
     MULTINODE = 'multinode'
+    ROUTER = 'router'
+    KV_P2P_TRANSFER = 'kv-p2p-transfer'
 
     # Scenario type keys
     FIXED_SEQ_LEN = 'fixed-seq-len'
@@ -42,7 +44,10 @@ class Fields(Enum):
     CONC_END = 'conc-end'
     CONC_LIST = 'conc-list'
     EP = 'ep'
+    DP = 'dp'
     DP_ATTN = 'dp-attn'
+    DCP_SIZE = 'dcp-size'
+    PP = 'pp'
 
     # Multinode-specific fields (when MULTINODE = true)
     SPEC_DECODING = 'spec-decoding'
@@ -111,6 +116,10 @@ class SingleNodeMatrixEntry(BaseModel):
     disagg: Literal[False]
     run_eval: bool = Field(alias=Fields.RUN_EVAL.value)
     eval_only: bool = Field(alias=Fields.EVAL_ONLY.value, default=False)
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
+    additional_settings: Optional[List[str]] = Field(
+        default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
+
 
 
 class WorkerConfig(BaseModel):
@@ -121,6 +130,8 @@ class WorkerConfig(BaseModel):
     tp: int
     ep: int
     dp_attn: bool = Field(alias=Fields.DP_ATTN.value)
+    dcp_size: Optional[int] = Field(default=None, alias=Fields.DCP_SIZE.value)
+    pp: Optional[int] = Field(default=None, alias=Fields.PP.value)
     hardware: Optional[str] = Field(default=None, min_length=1)
     additional_settings: Optional[List[str]] = Field(
         default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
@@ -187,7 +198,7 @@ class SingleNodeAgenticMatrixEntry(BaseModel):
     kv_offloading: Literal["none", "dram"] = Field(
         alias=Fields.KV_OFFLOADING.value
     )
-    kv_offload_backend: Optional[str] = Field(
+    kv_offload_backend: Optional[Union[Dict[str, str], str]] = Field(
         default=None, alias=Fields.KV_OFFLOAD_BACKEND.value
     )
     total_cpu_dram_gb: int = Field(alias=Fields.TOTAL_CPU_DRAM_GB.value, ge=0)
@@ -325,20 +336,20 @@ def _validate_agentic_runner_is_cluster(runner: str, scenarios) -> None:
 def _validate_kv_offload_fields(self):
     backend = getattr(self, "kv_offload_backend", None)
     if self.kv_offloading is None:
-        if backend not in (None, ""):
+        if backend not in (None, "", {}):
             raise ValueError(
                 f"{Fields.KV_OFFLOAD_BACKEND.value} requires "
                 f"{Fields.KV_OFFLOADING.value}"
             )
         return self
     if self.kv_offloading == "none":
-        if backend not in (None, ""):
+        if backend not in (None, "", {}):
             raise ValueError(
                 f"{Fields.KV_OFFLOAD_BACKEND.value} can only be set when "
                 f"{Fields.KV_OFFLOADING.value} is not 'none'"
             )
         return self
-    if backend is None or not backend.strip():
+    if not backend or (isinstance(backend, str) and not backend.strip()):
         raise ValueError(
             f"{Fields.KV_OFFLOAD_BACKEND.value} is required when "
             f"{Fields.KV_OFFLOADING.value} is '{self.kv_offloading}'"
@@ -352,16 +363,25 @@ class SingleNodeSearchSpaceEntry(BaseModel):
 
     tp: int
     ep: Optional[int] = None
+    dp: Optional[int] = Field(default=None, alias=Fields.DP.value)
+    additional_settings: Optional[List[str]] = Field(
+        default=[], alias=Fields.ADDITIONAL_SETTINGS.value)
     spec_decoding: Literal["mtp", "draft_model", "none"] = Field(
         default="none", alias=Fields.SPEC_DECODING.value)
     dp_attn: Optional[bool] = Field(
         default=None, alias=Fields.DP_ATTN.value)
+    dcp_size: Optional[int] = Field(
+        default=None, alias=Fields.DCP_SIZE.value)
+    pp: Optional[int] = Field(
+        default=None, alias=Fields.PP.value)
     conc_start: Optional[int] = Field(
         default=None, alias=Fields.CONC_START.value)
     conc_end: Optional[int] = Field(
         default=None, alias=Fields.CONC_END.value)
     conc_list: Optional[List[int]] = Field(
         default=None, alias=Fields.CONC_LIST.value)
+    router: Optional[Union[Dict[str, str], str]] = Field(default=None, alias=Fields.ROUTER.value)
+    kv_p2p_transfer: Optional[str] = Field(default=None, alias=Fields.KV_P2P_TRANSFER.value)
 
     @model_validator(mode='after')
     def validate_conc_fields(self):
@@ -376,12 +396,18 @@ class MultiNodeSearchSpaceEntry(BaseModel):
         default="none", alias=Fields.SPEC_DECODING.value)
     prefill: WorkerConfig
     decode: WorkerConfig
+    dcp_size: Optional[int] = Field(
+        default=None, alias=Fields.DCP_SIZE.value)
+    pp: Optional[int] = Field(
+        default=None, alias=Fields.PP.value)
     conc_start: Optional[int] = Field(
         default=None, alias=Fields.CONC_START.value)
     conc_end: Optional[int] = Field(
         default=None, alias=Fields.CONC_END.value)
     conc_list: Optional[List[int]] = Field(
         default=None, alias=Fields.CONC_LIST.value)
+    router: Optional[Union[Dict[str, str], str]] = Field(default=None, alias=Fields.ROUTER.value)
+    kv_p2p_transfer: Optional[str] = Field(default=None, alias=Fields.KV_P2P_TRANSFER.value)
 
     @model_validator(mode='after')
     def validate_conc_fields(self):
@@ -418,7 +444,9 @@ class AgenticCodingSearchSpaceEntry(BaseModel):
 
     tp: Optional[int] = None
     ep: Optional[int] = None
+    pp: Optional[int] = Field(default=None, alias=Fields.PP.value)
     dp_attn: Optional[bool] = Field(default=None, alias=Fields.DP_ATTN.value)
+    dcp_size: Optional[int] = Field(default=None, alias=Fields.DCP_SIZE.value)
     spec_decoding: Literal["mtp", "draft_model", "none"] = Field(
         default="none", alias=Fields.SPEC_DECODING.value)
     prefill: Optional[WorkerConfig] = None
@@ -426,12 +454,14 @@ class AgenticCodingSearchSpaceEntry(BaseModel):
     kv_offloading: Optional[Literal["none", "dram"]] = Field(
         default=None, alias=Fields.KV_OFFLOADING.value
     )
-    kv_offload_backend: Optional[str] = Field(
+    kv_offload_backend: Optional[Union[Dict[str, str], str]] = Field(
         default=None, alias=Fields.KV_OFFLOAD_BACKEND.value
     )
     conc_start: Optional[int] = Field(default=None, alias=Fields.CONC_START.value)
     conc_end: Optional[int] = Field(default=None, alias=Fields.CONC_END.value)
     conc_list: Optional[List[int]] = Field(default=None, alias=Fields.CONC_LIST.value)
+    router: Optional[Union[Dict[str, str], str]] = Field(default=None, alias=Fields.ROUTER.value)
+    kv_p2p_transfer: Optional[str] = Field(default=None, alias=Fields.KV_P2P_TRANSFER.value)
 
     @model_validator(mode='after')
     def validate_conc_fields(self):
@@ -527,6 +557,8 @@ class SingleNodeMasterConfigEntry(BaseModel):
     runner: str
     multinode: Literal[False]
     disagg: Literal[False] = Field(default=False)
+    router: Optional[Union[Dict[str, str], str]] = Field(default=None, alias=Fields.ROUTER.value)
+    kv_p2p_transfer: Optional[str] = Field(default=None, alias=Fields.KV_P2P_TRANSFER.value)
     scenarios: SingleNodeScenarios
 
     @model_validator(mode='after')
@@ -547,6 +579,8 @@ class MultiNodeMasterConfigEntry(BaseModel):
     runner: str
     multinode: Literal[True]
     disagg: bool = Field(default=False)
+    router: Optional[Union[Dict[str, str], str]] = Field(default=None, alias=Fields.ROUTER.value)
+    kv_p2p_transfer: Optional[str] = Field(default=None, alias=Fields.KV_P2P_TRANSFER.value)
     scenarios: MultiNodeScenarios
 
     @model_validator(mode='after')
