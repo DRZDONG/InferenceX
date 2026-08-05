@@ -77,7 +77,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-REPO_PAT="${REPO_PAT:-${GITHUB_TOKEN:-}}"
+REPO_PAT="${REPO_PAT:-}"
 $KUBECTL -n "$NS" create namespace "$NS" --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null 2>&1 || true
 $KUBECTL -n "$NS" create secret generic "$SECRET" --from-literal=token="${REPO_PAT}" >/dev/null 2>&1 || true
 
