@@ -55,12 +55,6 @@ export TPU_LOG_DIR="${TPU_LOG_DIR:-/root/.cache/tpu_logs}"
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/root/.cache/jax_compilation_cache}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
 
-# Apply the tpu_inference runtime hotpatches. They target the wyzhang image's
-# /root/cloud-devkit layout; on other images (e.g. vllm/vllm-tpu:nightly) those
-# paths are absent and this is a graceful no-op (nightly needs no patching).
-python3 "$(dirname "$0")/qwen3.5_tpuv7_hotpatches.py" >/dev/null 2>&1 || \
-    echo "[hotpatch] skipped (tpu_inference paths not present in this image)"
-
 SERVER_LOG=/workdir/server.log
 PORT=${PORT:-8888}
 
