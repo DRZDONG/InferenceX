@@ -191,6 +191,33 @@ ${INIT_CONTAINERS}
               set -euo pipefail
               ${HF_PREAMBLE}
               export PYTHONPYCACHEPREFIX=/tmp/pycache/
+              python3 -c '
+import os
+CACHE="/root/.cache"
+if os.path.exists(CACHE):
+    try:
+        s = os.statvfs(CACHE)
+        u = 100 * (s.f_blocks - s.f_bfree) // s.f_blocks
+        if u >= 65:
+            print(f"[cache-janitor] PVC usage {u}% >= 65%, pruning to 45%...", flush=True)
+            ents = []
+            for root, dirs, files in os.walk(CACHE):
+                for f in files:
+                    p = os.path.join(root, f)
+                    try: ents.append((os.path.getmtime(p), p))
+                    except OSError: pass
+            ents.sort()
+            for _, p in ents:
+                s_cur = os.statvfs(CACHE)
+                if (100 * (s_cur.f_blocks - s_cur.f_bfree) // s_cur.f_blocks) < 45: break
+                try: os.remove(p)
+                except OSError: pass
+            s_after = os.statvfs(CACHE)
+            u_after = 100 * (s_after.f_blocks - s_after.f_bfree) // s_after.f_blocks
+            print(f"[cache-janitor] pruned PVC usage: {u}% -> {u_after}%", flush=True)
+    except Exception as e:
+        print(f"[cache-janitor] warning: {e}", flush=True)
+' || true
               bash "${BENCH}"
               if [ "\${EVAL_ONLY:-false}" != "true" ]; then test -s "\${RESULT_FILENAME}.json"; fi
               if [ -f server.log ]; then tail -c 3000000 server.log > /tmp/server.log.cap && cp /tmp/server.log.cap server.log; fi
