@@ -278,11 +278,11 @@ jobs:
           REQUESTED_BY: ${{ steps.request.outputs.requested-by }}
           COMMENT_ID: ${{ steps.acknowledge.outputs.comment-id }}
         with:
-          github-token: ${{ secrets.INFX_FRONTEND_PAT }}
+          github-token: ${{ secrets.INFX_APP_PRIVATE_TPU_REPO_PAT }}
           script: |
             await github.rest.repos.createDispatchEvent({
               owner: 'SemiAnalysisAI',
-              repo: 'InferenceX-app',
+              repo: 'InferenceX-app-Private-TPU',
               event_type: 'stage-results',
               client_payload: {
                 'source-repository': `${context.repo.owner}/${context.repo.repo}`,

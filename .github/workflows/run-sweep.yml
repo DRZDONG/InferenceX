@@ -1014,9 +1014,9 @@ jobs:
             - name: Trigger database ingest
               run: |
                   curl -sSf -X POST \
-                    -H "Authorization: Bearer ${{ secrets.INFX_FRONTEND_PAT }}" \
+                    -H "Authorization: Bearer ${{ secrets.INFX_APP_PRIVATE_TPU_REPO_PAT }}" \
                     -H "Accept: application/vnd.github+v3+json" \
-                    https://api.github.com/repos/SemiAnalysisAI/InferenceX-app/dispatches \
+                    https://api.github.com/repos/SemiAnalysisAI/InferenceX-app-Private-TPU/dispatches \
                     -d '{
                       "event_type": "ingest-results",
                       "client_payload": {
@@ -1073,15 +1073,14 @@ jobs:
             - name: Trigger agentic database ingest
               run: |
                   curl -sSf -X POST \
-                    -H "Authorization: Bearer ${{ secrets.INFX_FRONTEND_PAT }}" \
+                    -H "Authorization: Bearer ${{ secrets.INFX_APP_PRIVATE_TPU_REPO_PAT }}" \
                     -H "Accept: application/vnd.github+v3+json" \
-                    https://api.github.com/repos/SemiAnalysisAI/InferenceX-app/dispatches \
+                    https://api.github.com/repos/SemiAnalysisAI/InferenceX-app-Private-TPU/dispatches \
                     -d '{
                       "event_type": "ingest-agentic-results",
                       "client_payload": {
                         "source-run-id": "${{ needs.setup.outputs.reuse-enabled == 'true' && needs.setup.outputs.reuse-source-run-id || github.run_id }}",
-                        "merge-run-id": "${{ github.run_id }}",
-                        "database-target": "production"
+                        "merge-run-id": "${{ github.run_id }}"
                       }
                     }'
 
