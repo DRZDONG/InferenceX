@@ -210,6 +210,13 @@ ${CACHE_MOUNT}
 ${CONFIGMAP_MOUNTS}
 EOF
 
+if [ -n "${CACHE_PVC:-}" ]; then
+  JOB_UID=$($KUBECTL -n "$NS" get job "${JOB}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  if [ -n "$JOB_UID" ]; then
+    $KUBECTL -n "$NS" patch pvc "${CACHE_PVC}" -p '{"metadata":{"ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"'"${JOB}"'","uid":"'"${JOB_UID}"'","blockOwnerDeletion":true}]}}' >/dev/null 2>&1 || true
+  fi
+fi
+
 if [ -z "$REPO_PAT" ]; then
   echo "[gke] waiting for init container to start for local workspace injection..."
   WAIT_POD_ITERS=0
