@@ -20,6 +20,7 @@ NS="${TPU_BENCH_NAMESPACE:-${NAMESPACE:-arc-runners}}"
 # to force the clone path.
 RO_PVC="${TPU_CACHE_RO_PVC-qwen-cache-ro}"
 RO_CACHE_MODELS="${TPU_RO_CACHE_MODELS:-Qwen/Qwen3.5-397B-A17B-FP8}"
+COMPILE_CACHE_PVC="${TPU_COMPILE_CACHE_PVC:-tpu-compile-cache}"
 SNAP="${TPU_CACHE_SNAPSHOT:-qwen-cache-snap}"           # golden VolumeSnapshot (fallback clone source; matches runners/k8s/v7/)
 CACHE_SC="${TPU_CACHE_STORAGECLASS:-hyperdisk-balanced-sc}"
 CACHE_SIZE="${TPU_CACHE_SIZE:-500Gi}"
@@ -97,7 +98,15 @@ for v in $ENV_VARS; do
   ENV_BLOCK+=$'\n'"            - name: ${v}"$'\n'"              value: \"${!v}\""
 done
 
-# Cache wiring
+# Compile cache wiring: prefer dedicated PVC if present, fall back to hostPath
+TPU_CACHE_VOL=""
+if [ -n "${COMPILE_CACHE_PVC:-}" ] && $KUBECTL -n "$NS" get pvc "$COMPILE_CACHE_PVC" >/dev/null 2>&1; then
+  TPU_CACHE_VOL=$'        - name: tpu-cache\n          persistentVolumeClaim:\n            claimName: '"${COMPILE_CACHE_PVC}"
+else
+  TPU_CACHE_VOL=$'        - name: tpu-cache\n          hostPath:\n            path: /var/lib/tpu-cache\n            type: DirectoryOrCreate'
+fi
+
+# Model cache wiring
 USE_RO=""
 if [ -n "$RO_PVC" ] && $KUBECTL -n "$NS" get pvc "$RO_PVC" >/dev/null 2>&1; then for _m in $RO_CACHE_MODELS; do [ "$_m" = "${MODEL:-}" ] && USE_RO=1; done; fi
 
@@ -168,10 +177,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-        - name: tpu-cache
-          hostPath:
-            path: /var/lib/tpu-cache
-            type: DirectoryOrCreate
+${TPU_CACHE_VOL}
 ${CACHE_VOL}
 ${CONFIGMAP_VOL}
 ${INIT_CONTAINERS}
