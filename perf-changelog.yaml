@@ -5319,3 +5319,9 @@
     - "Optimize batching and max-num-seqs scaling based on TP vs DP size on TPU v7"
     - "Dynamically calculate max-num-batched-tokens based on ISL and DP size"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/999
+
+- config-keys:
+    - qwen3.5-fp8-tpu7x-vllm
+  description:
+    - "Fix TPU v7 Kubernetes Job manifest generation and workflow result collection."
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/8

@@ -74,12 +74,6 @@ def calculate_hardware_success_rates():
     auth = Auth.Token(GITHUB_TOKEN)
     g = Github(auth=auth)
 
-    try:
-        user = g.get_user().login
-        print(f"Authenticated as user: {user}")
-    except Exception as e:
-        print(f"Authentication failed: {e}")
-        return None
 
     try:
         repo = g.get_repo(REPO_NAME)
