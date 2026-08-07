@@ -168,14 +168,17 @@ qwen3.5-fp8-tpu7x-vllm:
       search-space:
       - tp: 8
         dp: 1
-        conc-list: [4, 8, 16, 32, 64]
+        conc-list: [4, 8, 16, 32]
+      - tp: 2
+        dp: 4
+        conc-list: [64]
+        additional-settings:
+          - "DP_SCHED_ENABLED=1"
       - tp: 1
         dp: 8
         conc-list: [128, 256]
         additional-settings:
           - "DP_SCHED_ENABLED=1"
-          - "TPU_TOKEN_BUCKET_LINEAR_UNTIL=64"
-          - "TPU_TOKEN_BUCKET_LINEAR_INTERVAL=16"
           
 
 # Disaggregated prefill/decode + host-DRAM KV offload (PR #2019) for qwen3.5 on TPU v7.
