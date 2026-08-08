@@ -27,14 +27,19 @@ fi
 
 export PYTHONNOUSERSITE=1
 
-# --- TPU v7 / tpu_inference serving environment (from the validated JobSet) ---
+# --- TPU v7 / tpu_inference serving environment (from the validated JobSet & vllm-torchtpu) ---
+export TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-tpu7x}"
+export USE_MOE_SPARSE_CORE="${USE_MOE_SPARSE_CORE:-1}"
+export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
+export TPU_TOKEN_BUCKET_EXTRA="${TPU_TOKEN_BUCKET_EXTRA:-4,8,48}"
+export TPU_ROPE_CACHE_TRUNCATE="${TPU_ROPE_CACHE_TRUNCATE:-1}"
+export TPU_MOE_SKIP_PADDED_TOKENS="${TPU_MOE_SKIP_PADDED_TOKENS:-1}"
+
 export ATTN_BUCKETIZED_NUM_REQS="${ATTN_BUCKETIZED_NUM_REQS:-true}"
 export ATTN_CUSTOM_NUM_REQS_BUCKETS="${ATTN_CUSTOM_NUM_REQS_BUCKETS:-8,16,32,64}"
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
 export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-1}"
 export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}"
 export USE_MOE_EP_KERNEL="${USE_MOE_EP_KERNEL:-0}"
-export USE_MOE_SPARSE_CORE="${USE_MOE_SPARSE_CORE:-1}"
 export ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-true}"
 export RAGGED_GATED_DELTA_RULE_IMPL="${RAGGED_GATED_DELTA_RULE_IMPL:-chunked_kernel_v3_pd}"
 export MIN_TOKEN_BUCKET="${MIN_TOKEN_BUCKET:-8}"
@@ -57,24 +62,25 @@ export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-7200}"
 
 SERVER_LOG=/workdir/server.log
 PORT=${PORT:-8888}
+DP_VAL="${DP:-1}"
+
+# Global num of batched tokens == max(ISL, GLOBAL_BATCHED_TOKENS_MIN).
+GLOBAL_BATCHED_TOKENS_MIN="${GLOBAL_BATCHED_TOKENS_MIN:-16384}"
+GLOBAL_BATCHED_TOKEN=$(( ISL > GLOBAL_BATCHED_TOKENS_MIN ? ISL : GLOBAL_BATCHED_TOKENS_MIN ))
 
 if [ -z "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
-    DP_VAL="${DP:-1}"
-    VAL=$(( ISL / DP_VAL ))
-    if [ "$VAL" -gt 1024 ]; then
-        MAX_NUM_BATCHED_TOKENS="$VAL"
-    else
-        MAX_NUM_BATCHED_TOKENS=1024
-    fi
+    MAX_NUM_BATCHED_TOKENS=$(((GLOBAL_BATCHED_TOKEN + DP_VAL - 1) / DP_VAL))
 fi
 
 if [ -z "${MAX_NUM_SEQS:-}" ]; then
-    DP_VAL="${DP:-1}"
-    if [ "$TP" -gt "$DP_VAL" ]; then
-        MAX_NUM_SEQS="64"
-    else
-        MAX_NUM_SEQS="$(( CONC / 4 ))"
-    fi
+    MAX_NUM_SEQS=$((CONC * 2 / DP_VAL))
+    [ "$MAX_NUM_SEQS" -lt 1 ] && MAX_NUM_SEQS=1
+fi
+
+# Dynamic DP args: prefill-schedule-interval is only passed for DP modes (DP > 1)
+EXTRA_DP_ARGS=()
+if [ "$DP_VAL" -gt 1 ]; then
+    EXTRA_DP_ARGS+=(--prefill-schedule-interval="${PREFILL_SCHEDULE_INTERVAL:-256}")
 fi
 
 set -x
@@ -82,13 +88,13 @@ vllm serve "$MODEL" --host 0.0.0.0 --port "$PORT" \
     --served-model-name="$MODEL" \
     --max-model-len="$CALCULATED_MAX_MODEL_LEN" \
     --tensor-parallel-size="$TP" \
-    --data-parallel-size="$DP" \
+    --data-parallel-size="$DP_VAL" \
     --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS} \
     --max-num-seqs="${MAX_NUM_SEQS}" \
-    --gpu-memory-utilization=${GPU_MEM_UTIL:-0.90} \
+    --gpu-memory-utilization=${GPU_MEM_UTIL:-0.92} \
     --async-scheduling \
     --quantization="fp8" \
-    --prefill-schedule-interval=256 \
+    "${EXTRA_DP_ARGS[@]}" \
     --no-enable-prefix-caching \
     --limit-mm-per-prompt '{"image": 0, "video": 0}' \
     --kv-cache-dtype=${KV_CACHE_DTYPE:-fp8} \
@@ -113,7 +119,8 @@ run_benchmark_serving \
     --num-prompts $(( CONC * 10 )) \
     --max-concurrency "$CONC" \
     --result-filename "$RESULT_FILENAME" \
-    --result-dir /workdir/
+    --result-dir /workdir/ \
+    --use-chat-template
 
 if [ "${RUN_EVAL}" = "true" ]; then
     run_eval --framework lm-eval --port "$PORT"
