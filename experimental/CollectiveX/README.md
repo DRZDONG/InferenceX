@@ -65,21 +65,45 @@ frozen digest or locked case count.
 | H100/H200/B200/B300 | 1x8 NVLink, scale-up | 2x8 NVLink + RDMA, scale-out |
 | MI300X/MI325X/MI355X | 1x8 XGMI, scale-up | 2x8 XGMI + RDMA, scale-out |
 | GB200/GB300 | 2x4 MNNVL, scale-up | 4x4 MNNVL, scale-up |
-| TPU v7 (tpu7x) | 1x8 ICI, scale-up | unsupported coverage row — no multi-host slice |
+| TPU v7 (tpu7x) | 1x8 ICI, scale-up | 2x8 ICI, **scale-up** |
 
 Physical host count does not determine scope: both GB topologies stay inside one 72-GPU MNNVL
 scale-up domain.
 
-TPU v7 EP16 is recorded as unsupported rather than attempted, and the reason is how the pool is
-PROVISIONED, not a limit of the hardware. `tpu7x`'s ICI is a 3D torus that spans hosts — the
-[documented](https://docs.cloud.google.com/tpu/docs/tpu7x) topologies go `2x2x1` (4 chips, 1 host)
-→ `2x2x2` (8 chips, 2 hosts) → up to `8x16x16`, all one ICI fabric — so a multi-host TPU EP cell
-would be **scale-up over ICI**, not scale-out. What blocks it here is that `tpu-v7x` is provisioned
-as six *independent* `2x2x1` slices, so these particular hosts have no shared fabric. The fix is a
-larger slice (a JobSet plus `jax.distributed.initialize`, and `scale_up_domain` raised to match),
-not a cross-host transport; the `tpu-gke` launcher refuses `nodes > 1` rather than quietly measuring
-something else. `scale_out_transport: dcn` on the SKU describes the genuinely-scale-out case,
-cross-*slice* traffic over the 100 Gbps-per-chip data-center network, which no cell uses today.
+**TPU v7 EP16 is scale-up, and that is not a labelling convenience.** `tpu7x`'s ICI is a 3D torus
+that spans hosts — the [documented](https://docs.cloud.google.com/tpu/docs/tpu7x) topologies go
+`2x2x1` (4 chips, 1 host) → `2x2x2` (8 chips, 2 hosts) → up to `8x16x16`, all one ICI fabric — so a
+16-device cell crosses a host boundary without leaving the scale-up domain. Nothing touches DCN.
+`scale_up_domain` is therefore the literal `"ep"` for this SKU, meaning it follows the EP degree:
+the slice is provisioned at the size the case needs, so EP8 reports a domain of 8 and EP16 a domain
+of 16, and both stay `scope: scale-up`. A flat 8 would have labelled EP16 scale-out over DCN, which
+is false; a flat 16 would have over-claimed the EP8 shard, whose slice really is 8 devices wide.
+
+The consequence for comparison: **TPU EP16 is comparable to GB200/GB300 EP16** — also scale-up,
+inside a 72-GPU MNNVL domain — and **not** to b200/h100/mi355x EP16, which genuinely take an RDMA
+hop. Same EP degree, different regime; the artifact's `scope` is what disambiguates.
+`scale_out_transport: dcn` on the SKU describes the genuinely-scale-out case, cross-*slice* traffic
+over the 100 Gbps-per-chip data-center network, which no cell uses today.
+
+Running it needs a multi-host slice, which the obvious command does not create: `--tpu-topology`
+alone builds a *placement* policy and `tpu7x` rejects it ("Use workload policy instead"). The pool
+behind EP16 was created with an explicit workload policy —
+`resource-policies create workload-policy --type=HIGH_THROUGHPUT --accelerator-topology=2x2x2` —
+and the recipe is recorded in `launchers/launch_tpu-gke.sh` beside the guard that needs it. The
+shard then runs as an Indexed Job with a headless Service so GKE injects `TPU_WORKER_ID` and
+`TPU_WORKER_HOSTNAMES` for `jax.distributed.initialize()`. Both precisions share ONE multi-host
+shard: a slice is a single indivisible allocation, so two shards each wanting all its nodes get one
+pod apiece and both half-formed slices abort.
+
+Two multi-host invariants the probe enforces, because breaking either produces a plausible-looking
+number rather than an error. Every process must issue the *same sequence* of slice-wide collectives,
+so `reference_timing` runs `lockstep` (fixed iteration counts) under multi-host — a duration-driven
+loop makes the count depend on each host's clock and libtpu aborts the slice. And the mesh is built
+from `jax.devices()`, never `jax.local_devices()`: the latter would build an EP8 mesh per host and
+measure two independent 8-way exchanges under an EP16 label. That the exchange really spans 16 ranks
+is checked against physics rather than asserted — dispatch cost tracks the routing fanout
+(measured 1.232x from EP8 to EP16 at T=8192 against a fanout ratio of 1.232), where two independent
+8-way exchanges would sit at 1.0.
 
 | Backend | Current scope |
 |---|---|
@@ -88,7 +112,7 @@ cross-*slice* traffic over the 100 Gbps-per-chip data-center network, which no c
 | UCCL-EP | [UCCL](https://github.com/uccl-project/uccl) EP: a drop-in, API-identical DeepEP replacement whose CPU proxies issue GPUDirect RDMA over plain `libibverbs` (no NVSHMEM/IBGDA), with software message ordering, atomics, and flow control; scale-up is single-node `cudaIpc` over NVLink/XGMI (never MNNVL). `normal` mode is the legacy `Buffer` `dispatch`/`combine` (unweighted rank-sum); `low-latency` reuses the legacy `low_latency_dispatch`/`low_latency_combine` decode kernels (weighted combine), decode/EP8 only. FP8 dispatch is caller-prequantized in `normal` mode (blockwise e4m3fn, per-SKU e4m3fnuz on gfx942); in `low-latency` mode the caller sends BF16 and the decode kernel quantizes to e4m3 internally (`use_fp8`). Combine is BF16. Runs on NVIDIA and AMD (H100/H200/B200 + MI300X/MI325X/MI355X), EP8 scale-up. Cross-node EP16 is functional (the internode RDMA path connects and the light case passes correctness) but its CPU-proxy throughput overruns the standardized per-case wall-clock budget on heavy token counts, so EP16 is an unsupported coverage row for now |
 | NCCL EP | [NCCL EP](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_ep): NVIDIA's native MoE dispatch/combine on the NCCL Device API — LSA (NVLink load/store) intra-node, GIN (GPU-Initiated Networking) inter-node — driven through the `nccl4py` bindings. `normal` mode selects the `HIGH_THROUGHPUT` algorithm (FLAT `[N, hidden]` receive, unweighted rank-sum combine); the `LOW_LATENCY` algorithm is implemented in the adapter but has no enabled cell (see the `ll_backends` note above). BF16 only: NCCL EP's FP8 machinery exists upstream but its RELEASE.md lists it unsupported/untested, so no FP8 case is emitted. NVIDIA-only and CUDA 13 only. EP8 scale-up on H100/H200/B200/B300 plus EP8 and EP16 on GB200/GB300, where EP16 stays inside the MNNVL scale-up domain. x86 EP16 scale-out is an unsupported coverage row: the cross-node GIN path faults inside `nccl_ep.cc` identically on RoCE and IB across four SKUs, a GDAKI limit rather than a fabric-selection one |
 
-| JAX ragged A2A (TPU probe) | `jax.lax.ragged_all_to_all` on a 1-D device mesh over one host's ICI domain — the primitive JAX MoE stacks use for EP dispatch/combine. `normal` mode and BF16 only: the probe measures the interconnect collective itself, so there is no quantized dispatch path to label. Dispatch is a permute gather plus the ragged exchange; combine is the reverse exchange plus an fp32 scatter-add (unweighted rank-sum). `--transport-impl padded` swaps in a fixed-capacity `jax.lax.all_to_all` for JAX builds without the ragged primitive — a strictly worse model of production, never substituted silently, and named in the artifact. See the TPU Probe section for what this measurement is and is not |
+| JAX ragged A2A (TPU probe) | `jax.lax.ragged_all_to_all` on a 1-D device mesh over the slice's ICI domain — the primitive JAX MoE stacks use for EP dispatch/combine — at EP8 (one host) and EP16 (two hosts, still one ICI domain). `normal` mode, BF16 and FP8: FP8 dispatch is blockwise e4m3fn with one FP32 scale per 128-element block (DeepEP's `per_token_cast_to_fp8`), values and scales as two ragged exchanges, `fp8_consume: native` so the expert consumes fp8 directly and no standalone conversion sits between the collectives; the conversion is measured separately as `stage`. Combine is BF16 on both precisions, because the expert emits BF16. Dispatch is a permute gather plus the ragged exchange; combine is the reverse exchange plus an fp32 scatter-add (unweighted rank-sum). A JAX build lacking `ragged_all_to_all` **fails closed**: there is no padded fixed-capacity `all_to_all` fallback, because padding would move different bytes and quietly measure something else. See the TPU Probe section for what this measurement is and is not |
 
 DeepEP V2 means the `ElasticBuffer` implementation introduced by
 [DeepEP PR #605](https://github.com/deepseek-ai/DeepEP/pull/605), not a newer legacy `Buffer` build.
@@ -197,41 +221,133 @@ It runs on the GKE/ARC `tpuv7` pool, whose runner is a CPU-only coordinator pod.
 no enroot/pyxis, and no shared filesystem, so `launchers/launch_tpu-gke.sh` mirrors
 `runners/launch_tpuv7-gke.sh` instead of `launch_single-slurm.sh`: it packages the coordinator's
 already-pinned source subtree into a ConfigMap (~120 KB, no repository credential needed inside the
-pod), spawns ONE Kubernetes Job per shard onto a `tpu7x` node, runs every case in that one pod so
-each case after the first reuses the node-local XLA compile cache, and harvests the result JSONs back
-through the pod log. A red or partial leg still ships whatever it produced.
+pod), spawns ONE Kubernetes Job per shard onto `tpu7x` nodes, runs every case in that one Job, and harvests
+the result JSONs back through the pod log. At EP16 the Job is **Indexed** with one pod per host of the
+slice plus a headless Service, so GKE injects `TPU_WORKER_ID`/`TPU_WORKER_HOSTNAMES` for
+`jax.distributed.initialize()`; every pod computes the same rows and the pod at completion index 0
+writes the artifact, which is also the pod the harvest reads (`jax.process_index()` does NOT track the
+pod index, so keying off it would harvest the wrong pod half the time). A red or partial leg still ships whatever it produced.
 
-Three properties are deliberately weaker than the GPU family's, and each is named in the artifact:
+Two properties differ from the GPU family's, and each is named in the artifact:
 
-- `measurement.timing_source` is `host-wallclock-blocked...`. There is no public JAX equivalent of
-  `torch.cuda.Event`, so latencies are host wall-clock around `block_until_ready` on a jitted
-  program and include host dispatch overhead the CUDA-event numbers exclude. Measured on tpu7x that
-  overhead is a **~500 µs floor per call** — at T=1 it was ~98% of the reading, which made the
-  small-token end of the ladder meaningless.
+- `measurement.timing_source` is **`xla-device-trace-span`**. There is no public JAX equivalent of
+  `torch.cuda.Event`, so the probe reads device time out of the XLA profiler trace instead: SPANS
+  (first start to last end of a component's scope, not a sum of op durations), reduced MAX across
+  devices per occurrence, RAW percentiles. That is the same *kind* of number as the GPU SKUs' CUDA
+  events — chip time, no host dispatch cost.
 
-  The probe therefore **amortizes** by default: `--in-program-iters N` (default: the case's own
-  `--iters`, so each trial is one timed call) chains N identical operations inside a single jitted
-  program, dividing the floor by N. Each iteration's carry passes through
-  `jax.lax.optimization_barrier`, which keeps the value unchanged while creating the data dependency
-  that stops XLA from common-subexpressioning the N calls into one — without it the chain would
-  report a fictitiously fast number, so a build lacking the barrier fails closed instead of
-  amortizing. `--in-program-iters 1` opts out (`COLLX_TPU_IN_PROGRAM_ITERS` on the runner).
+  `host-wallclock-blocked` remains as a fallback and is **opt-in** (`--allow-host-fallback`),
+  deliberately: host wall-clock on tpu7x carries a per-call dispatch floor that is payload-dependent
+  and reaches thousands of microseconds, so a host figure published as if it were comparable would
+  be badly wrong at the small-token end. Without the flag, a point that fails to yield a device span
+  fails the case rather than silently downgrading. Provenance is recorded PER COMPONENT
+  (`row.timing_source`), because the profiler can cover some components and not others and a
+  whole-case label once claimed device timing for rows that were host-timed.
 
-  The trade is statistical and is recorded, not hidden: with N > 1 each sample is the **mean** of N
-  consecutive operations, so `p99` no longer captures a single slow operation. `timing_source`
-  becomes `host-wallclock-blocked-amortized-xN` and `sampling.in_program_iterations` carries N, so a
-  consumer can tell the two apart without reading the code. Amortization also divides the host-call
-  count by N (10,240 → 1,280 calls per component at N=8), which is what keeps the prefill ladder
-  inside its wall-clock budget.
-- `components.stage` is `unavailable`: the permute is fused into dispatch, so there is no separate
-  staging pass to time. The per-destination layout (offsets, sizes, gather indices) is precomputed on
+  An earlier revision amortized instead, chaining N operations inside one program to divide the host
+  floor (`--in-program-iters`). Device spans made that unnecessary and the flag is gone; if you find
+  a reference to it, the reference is stale.
+- `components.stage` is `unavailable` **on BF16 rows**: the permute is fused into dispatch and
+  there is no conversion, so there is nothing to time. **FP8 rows publish it** — the fp8→bf16
+  conversion, hoisted out of both combine and the chained roundtrip and measured separately, which
+  is what lets `roundtrip + stage` reconstruct the mismatched-config cost. Do not add `stage` to
+  `roundtrip` when comparing against a GPU `native` row; do add it when comparing against a
+  `CX_FP8_CONSUME=dequant` one. The per-destination layout (offsets, sizes, gather indices) is precomputed on
   host and excluded from the timed region, the same treatment DeepEP's layout pass gets; the
   on-device permute gather and the combine scatter-add ARE timed, because production pays them.
 - `implementation.oracle` is `probe-source-identity-and-exact-rank-sum`, narrower than the GPU
   harness's full per-expert transform oracle. It still proves real things: every dispatched copy is
-  decoded back to the source token it claims to be and compared bit-for-bit, its landing offset is
-  checked against the exchange plan, and the combine is compared against the exact expected
-  unweighted rank-sum. The expert is the identity, so no per-expert transform is modelled.
+  decoded back to the source token it claims to be (the ID rides in the SIGN of the first columns,
+  which survives quantization), its landing offset is checked against the exchange plan, and the
+  combine is compared against the exact expected rank-sum. The expert is the identity, so no
+  per-expert transform is modelled.
+
+  Under BF16 the payload is compared bit-for-bit against the source. Under FP8 it deliberately is
+  NOT, and the reason is worth knowing before anyone "fixes" it: two XLA compilations of the same
+  quantize recipe round this lattice's e4m3 midpoints in opposite directions (measured — the wire
+  carried `161/256` where a standalone program produced `152/256`), so an expectation re-derived by
+  quantizing again is a coin flip. The GPU harness compares re-quantized bits only because
+  `assert_quantize_identity` establishes that premise on metal first. Instead: the arrived chunk is
+  compared byte-for-byte against the STAGED chunk from the same execution; combine is scored against
+  the rows dispatch actually delivered, each attributed to the token its payload claims to be; and
+  the timed program's own scales and dequantized values are tied back to the oracle program's, since
+  the two are separate compilations. Nothing in that chain re-quantizes anything.
+
+### The chained pair period
+
+`pair_period` is a **different quantity** from `roundtrip`: the steady-state rate of one
+dispatch→combine pair in a chain that never drains, where `roundtrip` is one pair entered from
+idle. Do not sum them and do not substitute one for the other. `--chain-iters` (default 64) pairs
+run inside one compiled program, the carry of each feeding the next — a real data dependency, not
+an `optimization_barrier`, because a barrier constrains ordering and not liveness and XLA will
+delete a computation nothing consumes.
+
+**The chain is renormalised, and it has to be.** Combine is an unweighted rank-sum, so one pair
+multiplies token `t` by `d_t`, its number of unique destination ranks — measured 3..7 at EP8 and
+4..8 at EP16 for deepseek-v3 top-8. Over 64 iterations that is `d_t**64` against bf16's 3.39e38
+ceiling: unrenormalised, the first element saturates at iteration 43 and **100% of EP16 elements
+are infinite by 64**. The body divides the fp32 rank-sum by `d_t` before casting back, which makes
+one pair the identity BITWISE (the fp32 sum of `d_t ≤ 8` copies of a bf16 value is exact, and IEEE
+division is correctly rounded). The count is shipped, never `1/d`: over 200k values
+`(d*v)*float32(1/d)` disagrees with `v` for `d == 7` on 58% of them, and seven destinations occurs
+in both layouts.
+
+`correctness.chain_regime_passed` is that identity, scored on the timed program and reduced across
+hosts. **Tri-state**: `true` passed, `false` means it ran and disagreed (which fails the row),
+`null` means it could not be evaluated (which withholds the period but does not condemn the drained
+components measured in the same case). The drained oracle cannot cover this regime — it only ever
+checks one pair entered from idle, so a transport that corrupts only under free-running pairs would
+present as the fastest in the suite.
+
+`chain_floor_us` is per direction, `origin: chained-cross-rank-min`. Candidates are the collectives
+that occur exactly `--chain-iters` times per device; they are then grouped by the set of device rows
+they appear on, and the anchors are the two highest-total ops in the **busiest row group that can
+form a pair at all** (≥2 ops). Row grouping is what makes the two anchors comparable: tpu7x logs
+more than one kind of core, so a `sparse-core-…` op can out-total a real anchor, and two ops on
+equal-sized but *disjoint* row sets are not a pair however large they are — a rule that selected on
+row-set **size** published floors at 2 of 10 points, worse than the 5 of 10 it replaced. The
+`≥2` eligibility matters separately: without it a single large op alone on a sparse-core row wins
+on total and the point fails holding one candidate. The surviving pair must also interleave
+d,c,d,c. Direction comes from per-iteration start order. If any gate fails, **both** directions publish
+`unavailable` with the reason; null here means "not measured", never "same as the other one".
+`chain_health.anchor.phase` reports where the combine anchor starts within the period — ~0.5 is a
+real pair, ~0 or ~1 means both anchors are one direction, which alternation alone cannot detect.
+
+**A cross-check worth running on any new SKU:** if the anchors really are dispatch-then-combine
+back to back, `phase` should track `chain_floor_us.dispatch / pair_period`, because combine starts
+when dispatch's collective ends. Those come from independent quantities — one from start
+timestamps, the other from op durations — so agreement is evidence the direction LABELS are right
+and not merely self-consistent. Measured on bf16 (run 31194062843), across a 128x size range and
+both EP degrees:
+
+| T | `floor_dispatch / period` EP8 | `phase` EP8 | `floor_dispatch / period` EP16 | `phase` EP16 |
+|--:|--:|--:|--:|--:|
+| 64 | 0.321 | 0.361 | 0.332 | 0.365 |
+| 512 | 0.276 | 0.294 | 0.287 | 0.311 |
+| 8192 | 0.265 | 0.280 | 0.271 | 0.286 |
+
+`phase` sits slightly above the ratio on all 28 chained rows (largest gap 0.064), which is the
+expected sign: the floor is a cross-rank **min** and the phase is measured on the device that
+actually paces the chain. A `phase` that does NOT track that ratio means the two anchors are not
+the two directions, however cleanly they interleave.
+
+`chain_health` mirrors the GPU family's block shape (each field a component with `percentiles_us`,
+not a bare float):
+
+| field | meaning |
+|---|---|
+| `interpair_gap_us` | start-to-start minus the chain scope's own extent per iteration. Near zero is free-running. **Measured 0.0–0.2 µs, 0.0–0.1% of the period**, at EP8 and EP16. Not the collective floors and not an op sum — both leave the permute and scatter-add inside the "gap" and read 47% and 20–30% respectively. |
+| `settle_drift_us` | per-device late-half minus early-half p50, reduced by signed max-magnitude. Defends or indicts `--chain-drop`. Measured ≤0.6 µs. |
+| `pair_spread_us` | cross-device spread per iteration. |
+| `devices` / `devices_expected` | at EP16 each process profiles only its own 8 devices, so the per-device period matrix is allgathered before the reduction — the missing half is exactly where inter-host stragglers live. `gathered_across_hosts` says whether that happened; `devices_expected` stays the honest 16. |
+| `op_inventory` | every op in the chain body, per iteration. This is what makes the fp8 exclusion checkable rather than argued. |
+| `renorm_us` | **`unavailable`, and expected to be**: XLA fuses the divide into the adjacent cast, so no op carries the scope. The cost is bounded by cross-run differencing at ≤0.05% of the period, not measured directly. |
+| `capture_s` / `capture_budget_s` | what the chain capture cost against the launcher's own per-case timeout. Measured 13–22 s against 2700. |
+
+**FP8 is deliberately not chained.** Its combine needs BF16, so a chained fp8 body would carry the
+fp8→bf16 conversion inside the loop and the period would include work the `native` contract says
+production does not do standalone. `implementation.chained_period` is `false` on fp8 rows and the
+chained fields are `unavailable` with that reason — not silently absent.
 
 Workload identity IS shared with the GPU family: `bench/routing_np.py` is a parity-tested numpy port
 of `bench/routing.py` (the TPU image has no usable torch), so both families benchmark the identical

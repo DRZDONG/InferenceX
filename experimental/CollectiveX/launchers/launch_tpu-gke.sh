@@ -45,9 +45,38 @@ NODES="${COLLX_NODES:-1}"
 GPN="${COLLX_GPUS_PER_NODE:-8}"
 SCALE_UP_DOMAIN="${COLLX_SCALE_UP_DOMAIN:-8}"
 NGPUS="${COLLX_NGPUS:-$((NODES * GPN))}"
-[ "$NODES" = 1 ] || collx_die \
-  "the tpu-gke launcher runs single-host slices only; EP$NGPUS needs a multi-host \
-TPU slice (JobSet + jax.distributed) that this node pool does not provide"
+# Multi-host slices (EP16 = two 8-device hosts inside ONE ICI slice) run as an Indexed Job
+# with a headless Service: GKE then injects TPU_WORKER_ID and TPU_WORKER_HOSTNAMES, which is
+# what jax.distributed.initialize() reads on Cloud TPU. Nothing leaves ICI -- the slice is
+# one scale-up domain, which is why the matrix keeps scope=scale-up at EP16.
+# Topology is per HOST COUNT, not per coordinator: one coordinator runs both the EP8 shard
+# (1 host, 2x2x1) and the EP16 shard (2 hosts, 2x2x2), so a single COLLX_TPU_TOPOLOGY cannot
+# serve both. COLLX_TPU_TOPOLOGY_N<hosts> wins, then the flat COLLX_TPU_TOPOLOGY, then the
+# single-host default. Nothing is DERIVED from the host count -- a topology that no node pool
+# provides schedules a pod that pends forever, so it must be declared.
+eval "TOPOLOGY_FOR_NODES=\${COLLX_TPU_TOPOLOGY_N${NODES}:-}"
+TOPOLOGY="${TOPOLOGY_FOR_NODES:-${COLLX_TPU_TOPOLOGY:-2x2x1}}"
+if [ "$NODES" != 1 ]; then
+  [ -n "${TOPOLOGY_FOR_NODES:-${COLLX_TPU_TOPOLOGY:-}}" ] || collx_die \
+    "EP$NGPUS needs $NODES hosts: set COLLX_TPU_TOPOLOGY_N${NODES} to a multi-host tpu7x \
+topology (the single-host default 2x2x1 is 4 chips / 8 JAX devices)"
+  [ "${TOPOLOGY}" != "2x2x1" ] || collx_die \
+    "topology 2x2x1 is a SINGLE host (4 chips, 8 JAX devices); EP$NGPUS needs $NODES hosts"
+  # Provisioning note, because the obvious command FAILS on tpu7x. A multi-host pool needs
+  # an explicit WORKLOAD policy; `--tpu-topology` on its own creates a PLACEMENT policy and
+  # GKE rejects it:
+  #   "Creation of a managed instance group with tpu7x-standard-4t machine type with
+  #    placement policy is not supported. Use workload policy instead."
+  # The pool this shard targets was created as:
+  #   gcloud compute resource-policies create workload-policy collx-tpuv7-mh \
+  #     --type=HIGH_THROUGHPUT --accelerator-topology=2x2x2 --region=us-central1
+  #   gcloud container node-pools create tpu-v7x-mh --cluster=<cluster> \
+  #     --location=<zone> --node-locations=<zone> --machine-type=tpu7x-standard-4t \
+  #     --num-nodes=2 --tpu-topology=2x2x2 --placement-policy=collx-tpuv7-mh \
+  #     --reservation-affinity=specific --reservation=<reservation>
+  # The same incompatibility is documented for SINGLE-host pools in
+  # runners/k8s/README-tpuv7.md; it extends to the multi-host path.
+fi
 TS="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 
 # GKE coordinates. Tracked defaults match runners/k8s/README-tpuv7.md; an operator
@@ -66,18 +95,38 @@ if [ -z "$NS" ]; then
   NS="${NS:-arc-runners}"
 fi
 ACCELERATOR="${COLLX_TPU_ACCELERATOR:-tpu7x}"
-TOPOLOGY="${COLLX_TPU_TOPOLOGY:-2x2x1}"
 CHIPS="${COLLX_TPU_CHIPS:-4}"
 CACHE_HOSTPATH="${COLLX_TPU_CACHE_HOSTPATH:-/var/lib/tpu-cache}"
 # Reusing a cross-run compile cache costs device-timing coverage; see the note below.
 COMPILE_CACHE="${COLLX_TPU_COMPILE_CACHE:-0}"
-# Capture a profiler trace and publish true device-side durations alongside the host
-# ones. Off by default: it is the only measurement free of the host dispatch floor,
-# but it writes a trace per case and costs an extra short pass.
-XPROF_ARGS=""
-[ "${COLLX_TPU_XPROF:-0}" = 1 ] \
-  && XPROF_ARGS="--xprof --xprof-iters ${COLLX_TPU_XPROF_ITERS:-20}"
-RUN_TIMEOUT="${COLLX_RUN_TIMEOUT:-900}"
+# Device-side tracing is MANDATORY, not optional, and the comment here used to say the
+# opposite ("off by default"). It was never off: --xprof defaults True in run_ep_jax.py and
+# nothing on this path passes the --no-xprof that would disable it, so the old
+# COLLX_TPU_XPROF=1 gate only ever changed --xprof-iters.
+#
+# Leaving it that way would have been a footgun rather than a dead knob. Device spans are the
+# published latency, and a point that yields none fails the case (exit 6) unless
+# --allow-host-fallback is given -- so an operator who set COLLX_TPU_XPROF=0 expecting to shed
+# "an extra short pass" would have turned every case red instead. Tracing is therefore
+# unconditional and only the occurrence count is tunable.
+XPROF_ARGS="--xprof --xprof-iters ${COLLX_TPU_XPROF_ITERS:-20}"
+[ "${COLLX_TPU_XPROF:-1}" = 1 ] || collx_log \
+  "NOTE: COLLX_TPU_XPROF=${COLLX_TPU_XPROF} ignored; device spans are the published latency \
+and a case without them fails closed. Pass --no-xprof --allow-host-fallback by hand for a \
+host-timed run."
+# 1800s per case, not 900. Mirrors the public tree, and EP16 needs it: a multi-host
+# shard pays ~70s of TPU backend init, compiles every program cold across 16 devices
+# (the node-local cache is off by default -- it breaks profiler scope attribution),
+# and since a slice is one indivisible allocation all four cases share ONE budget.
+# Measured, twice: at 900/case the merged EP16 shard published its whole decode ladder and
+# was SIGKILLed mid-prefill at 4x900=3600s. At 1800/case it ran 7252s against the 7200s
+# ceiling -- three of four cases banked, the fourth starved. The ceiling is per SHARD, not
+# per case (timeout wraps the whole in-pod loop, because the cluster join is once per
+# process), so an overrunning case eats its successors' budget; sizing it needs the worst
+# case, not the mean. 2700 x 4 = 10800s, inside the coordinator's 17100s wait.
+RUN_TIMEOUT="${COLLX_RUN_TIMEOUT:-2700}"
+# Computed once EXPECTED_CASES is known, below.
+SHARD_DEADLINE=""
 
 # ---- shard control ----------------------------------------------------------
 SHARD="${COLLX_SHARD_FILE:-}"
@@ -86,6 +135,10 @@ SHARD="${COLLX_SHARD_FILE:-}"
 EXPECTED_CASES="$(python3 "$COLLX_RUNTIME_DIR/config.py" case-count "$SHARD")" \
   && [[ "$EXPECTED_CASES" =~ ^[1-9][0-9]*$ ]] \
   || collx_die "could not enumerate shard cases"
+# Per-case budget x cases, plus one case of slack for image pull and rendezvous. The Job
+# cannot outlive this whatever happens to the coordinator that launched it.
+SHARD_DEADLINE="${COLLX_TPU_SHARD_DEADLINE:-$(( RUN_TIMEOUT * (EXPECTED_CASES + 1) ))}"
+[[ "$SHARD_DEADLINE" =~ ^[1-9][0-9]*$ ]] || collx_die "shard deadline is not a duration"
 
 collx_log "runner=$RUNNER accelerator=$ACCELERATOR topology=$TOPOLOGY \
 world=$NGPUS bench=$COLLX_BENCH \
@@ -148,17 +201,88 @@ $KUBECTL -n "$NS" create configmap "$PAYLOAD_CM" \
 # on a 4-chip request. run_ep_jax.py still fails closed if it sees fewer devices than the case needs,
 # so a machine type where this no longer holds surfaces as a clear error rather than a
 # silent EP downgrade.
+JOB_COMPLETION_SPEC=""
+POD_SUBDOMAIN_SPEC=""
+JOB_BACKOFF_LIMIT=1
+if [ "$NODES" != 1 ]; then
+  # One pod per host of the slice. GKE derives TPU_WORKER_ID from the pod's completion index
+  # and TPU_WORKER_HOSTNAMES from the headless Service, which is what
+  # jax.distributed.initialize() reads on Cloud TPU.
+  #
+  # Indexed Job, NOT JobSet, even though the cluster has the JobSet controller (v0.12.0).
+  # The reason is the harness contract, not preference: this launcher already retries a
+  # whole shard at the coordinator level and backfills a terminal-failure artifact per
+  # missing case, and a Job is what `kubectl wait --for=condition=complete/failed` observes.
+  # Swapping in a JobSet would give a second, differently-shaped completion signal for the
+  # harvester to interpret.
+  #
+  # The failure mode JobSet's RecreateAll would fix is real and is handled instead by the
+  # per-case timeout: if one worker dies, its partner blocks in the collective until
+  # COLLX_RUN_TIMEOUT fires, the shard reports that case failed, and the backfill emits an
+  # explicit red artifact. Slower than a fast restart, never silent -- and a hung worker
+  # cannot publish a number, which is the property that matters.
+  SVC="${JOB}-hosts"
+  cat <<EOSVC | $KUBECTL -n "$NS" apply -f - >/dev/null \
+    || collx_die "cannot create the headless Service for the multi-host slice"
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SVC}
+  ownerReferences: []
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    job-name: ${JOB}
+  ports:
+    - { name: jax, port: 8476 }
+EOSVC
+  JOB_COMPLETION_SPEC="  completionMode: Indexed
+  completions: ${NODES}
+  parallelism: ${NODES}"
+  POD_SUBDOMAIN_SPEC="      subdomain: ${SVC}"
+  JOB_BACKOFF_LIMIT=0
+fi
+
 cat <<EOF | $KUBECTL -n "$NS" apply -f - >/dev/null || collx_die "cannot create the bench Job"
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: ${JOB}
 spec:
-  backoffLimit: 0
+  # Retry ONCE on single-host, never on multi-host.
+  #
+  # Single-host: this cluster is shared and an evicted or unscheduled pod loses the whole
+  # shard -- EP8 fp8 failed that way in 2 of 4 runs while EP8 bf16 passed 4 of 4, and the
+  # asymmetry is exposure, not precision: the fp8 shard traces four components instead of
+  # three, so it runs longer and meets more contention. A retry does NOT mask a real
+  # failure: a shard that ran produces an artifact per case (red ones included, via the
+  # terminal-failure backfill), so a genuine red re-runs, goes red again, and the Job still
+  # ends failed. It costs time on a truly broken shard and rescues a preempted one.
+  #
+  # Multi-host: 0, deliberately. An Indexed Job retries the FAILED INDEX only, and its peer
+  # has already exited -- the replacement pod would sit in a collective waiting for a
+  # process that is gone, then die at the shard timeout. All-or-nothing restart is what
+  # JobSet's RecreateAll provides and this launcher does not use it (see the note above).
+  backoffLimit: ${JOB_BACKOFF_LIMIT}
   ttlSecondsAfterFinished: 900
+  # The Job must be able to end WITHOUT the coordinator. ttlSecondsAfterFinished deletes
+  # a Job that has finished; it does nothing for one that never will. Measured: when GHA
+  # cancelled a shard mid-run, the cleanup trap did not survive the kill and the Job ran on
+  # -- still Running at 159 minutes with both pods alive, holding the entire multi-host
+  # slice, with no coordinator left to ever harvest its results. Any later EP16 shard would
+  # have queued behind garbage.
+  #
+  # activeDeadlineSeconds is the coordinator-independent bound: k8s fails the Job at the
+  # shard's own budget, the TTL then deletes it, and the slice frees itself. The value is
+  # the same budget the in-pod script uses, so this cannot fire before the work would have
+  # been abandoned anyway.
+  activeDeadlineSeconds: ${SHARD_DEADLINE}
+${JOB_COMPLETION_SPEC}
   template:
     spec:
       restartPolicy: Never
+${POD_SUBDOMAIN_SPEC}
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR}
         cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
@@ -210,8 +334,22 @@ spec:
               export PYTHONPYCACHEPREFIX=/tmp/pycache
               rc=0
               shard_timeout=\$(( ${RUN_TIMEOUT} * ${EXPECTED_CASES} ))
+              # -u / PYTHONUNBUFFERED are NOT optional. Without them stdout is
+              # block-buffered into the pod log and a SIGKILL from timeout discards the
+              # whole buffer, so a hung shard reports NOTHING about where it got to. The
+              # first EP16 attempt died exactly that way: killed at 1800s with only the
+              # case banner (printed by this shell, not by Python) in the log.
+              #
+              # Two hazards this block has already tripped, both invisible to bash -n:
+              #  1. no comment may sit between a backslash continuation and the line it
+              #     continues -- a comment there ends the command, so timeout would run
+              #     with no arguments and Python would never start;
+              #  2. NO BACKTICKS anywhere in this heredoc. It is unquoted <<EOF, so the
+              #     coordinator performs command substitution on the body and a stray pair
+              #     aborts the whole manifest with "unexpected EOF while looking for
+              #     matching" -- which is what broke every shard, EP8 included.
               timeout -k 30 "\$shard_timeout" \\
-                python3 bench/run_ep_jax_shard.py \\
+                env PYTHONUNBUFFERED=1 python3 -u bench/run_ep_jax_shard.py \\
                   --shard /workdir/collectivex/shard.json \\
                   --runner "${RUNNER}" \\
                   --timestamp "${TS}" \\
@@ -298,10 +436,44 @@ collx_log "launched $JOB; waiting for completion"
 JOB_RC=0
 WAIT_ITERS=0
 WAIT_MAX="${COLLX_TPU_WAIT_ITERS:-1140}"   # x15s ~ 285 min, under the workflow timeout
+VANISHED=0
+# x15s: a real deletion is permanent, so waiting 45s to confirm costs nothing, while a
+# transient API failure that lasts three polls is no longer transient.
+VANISH_CONFIRMATIONS="${COLLX_TPU_VANISH_CONFIRMATIONS:-3}"
 while true; do
   succeeded="$($KUBECTL -n "$NS" get job "$JOB" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
   failed="$($KUBECTL -n "$NS" get job "$JOB" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
-  [ "${succeeded:-0}" = 1 ] && break
+  # $NODES, not 1. A multi-host slice runs an Indexed Job with completions=$NODES, so
+  # .status.succeeded reaches 2 and never equals 1 -- the coordinator then polls a Job that
+  # finished long ago, the TTL deletes it at 900s, and the whole shard is reported as a
+  # timeout at WAIT_MAX with its results unharvestable. Measured: run 30960700207 sat here
+  # for 277 minutes after its EP16 shard had completed. Single-host is unaffected: with no
+  # completions set the Job defaults to 1, which is also $NODES.
+  [ "${succeeded:-0}" = "$NODES" ] && break
+  # A Job that vanished while we were waiting cannot be harvested, and silently looping to
+  # WAIT_MAX turns that into a 285-minute non-answer.
+  #
+  # But `! kubectl get` is true for ANY kubectl failure, not just NotFound, and the two
+  # status reads above swallow their errors with `|| true` -- so during one transient API
+  # blip (throttling, a credential refresh, a network hiccup) all three conditions hold at
+  # once and a healthy Job is declared deleted. Measured in run 31109742122: two of three
+  # shards aborted this way at 11.5 and 31.5 minutes, both mid-case with the pod doing real
+  # work, neither old enough for the 900s TTL to explain it. So: match NotFound explicitly,
+  # and require consecutive confirmations so a flapping API server cannot fake a deletion.
+  if [ -z "$succeeded" ] && [ -z "$failed" ]; then
+    probe="$($KUBECTL -n "$NS" get job "$JOB" 2>&1 >/dev/null || true)"
+    case "$probe" in
+      *NotFound*) VANISHED=$((VANISHED + 1)) ;;
+      *)          VANISHED=0 ;;
+    esac
+  else
+    VANISHED=0
+  fi
+  if [ "$VANISHED" -ge "$VANISH_CONFIRMATIONS" ]; then
+    collx_log "ERROR: bench Job $JOB no longer exists (deleted or TTL-expired mid-wait)"
+    JOB_RC=1
+    break
+  fi
   if [ "${failed:-0}" != 0 ]; then
     collx_log "ERROR: bench Job failed"
     JOB_RC=1
@@ -319,13 +491,59 @@ done
 
 # ---- harvest: pull results out of the pod log, red or green -----------------
 LOG="${COLLX_JOB_ROOT:-/tmp}/${JOB}.log"
+# `kubectl logs job/NAME` picks ONE pod of a multi-pod Job, arbitrarily. Only the pod at
+# completion index 0 writes the artifact (run_ep_jax.writes_artifact), so on a multi-host
+# shard the selector has to name that pod or roughly half of otherwise-good sweeps harvest
+# the pod that wrote nothing and report "no result payload".
+if [ "$NODES" = 1 ]; then
+  LOG_TARGET=("job/$JOB")
+else
+  LOG_TARGET=(-l "batch.kubernetes.io/job-name=$JOB,batch.kubernetes.io/job-completion-index=0")
+fi
 for _attempt in 1 2 3 4 5; do
-  $KUBECTL -n "$NS" logs "job/$JOB" -c bench --tail=-1 > "$LOG" 2>/dev/null || true
+  $KUBECTL -n "$NS" logs "${LOG_TARGET[@]}" -c bench --tail=-1 > "$LOG" 2>/dev/null || true
   grep -q '=====OUT_TGZ_B64_END=====' "$LOG" && break
   sleep 5
 done
 # Surface the pod's own diagnostics on the coordinator; the markers stay out of the tail.
 grep -v '^[A-Za-z0-9+/=]\{200,\}$' "$LOG" | tail -40 >&2 || true
+
+# On a multi-host slice the OTHER pods' logs are where the cause usually is. libtpu reports
+# SLICE_FAILURE_SW_INJECT_ERROR on the worker that NOTICED a peer die, so the pod that
+# actually failed is a different one -- and only index 0 is harvested for results. Dump every
+# other pod's tail, or the real error is never seen.
+if [ "$JOB_RC" != 0 ]; then
+  # EVERY pod, named, with no attempt to identify the completion index. The first version
+  # read the index from an annotation via jsonpath, got an empty string back, and
+  # `[ "${_index:-0}" = 0 ] && continue` then treated every pod as index 0 and skipped the
+  # lot -- so the dump silently produced nothing on the exact run it was added for.
+  # Repeating index 0's tail is harmless; failing to print the peer's is not.
+  # Single host included: an EP8 shard failed twice with nothing but "the Job
+  # returned no result payload", which names neither a crash nor a scheduling
+  # refusal nor an evicted pod.
+  echo "---- per-pod tails (${NODES} host(s)) ----" >&2
+  for _pod in $($KUBECTL -n "$NS" get pods \
+      -l "batch.kubernetes.io/job-name=$JOB" -o name 2>/dev/null); do
+    echo "---- ${_pod} ----" >&2
+    $KUBECTL -n "$NS" logs "$_pod" -c bench --tail=60 2>/dev/null \
+      | grep -v '^[A-Za-z0-9+/=]\{200,\}$' >&2 || true
+  done
+  # Pod objects too: a libtpu abort, an eviction and an OOMKill look identical in the log
+  # but differ here, in the container's terminated reason and exit code.
+  $KUBECTL -n "$NS" get pods -l "batch.kubernetes.io/job-name=$JOB" \
+    -o custom-columns='POD:.metadata.name,PHASE:.status.phase,REASON:.status.containerStatuses[0].state.terminated.reason,EXIT:.status.containerStatuses[0].state.terminated.exitCode,NODE:.spec.nodeName' \
+    2>/dev/null >&2 || true
+  # The Job's own conditions and the EVENTS. When the pod list comes back EMPTY -- which is
+  # how an EP8 shard failed, printing a bare "per-pod tails" header and nothing under it --
+  # the pod either never existed or was already collected, and only events say which:
+  # FailedScheduling, FailedCreate, Evicted, and preemption all live here and nowhere else.
+  # This cluster is shared, so "someone else's workload took the node" is a real answer.
+  $KUBECTL -n "$NS" get job "$JOB" -o jsonpath='{range .status.conditions[*]}job-condition {.type}={.status} {.reason} {.message}{"\n"}{end}' 2>/dev/null >&2 || true
+  $KUBECTL -n "$NS" get events --field-selector "involvedObject.name=$JOB" \
+    -o custom-columns='TIME:.lastTimestamp,REASON:.reason,MSG:.message' 2>/dev/null \
+    | tail -15 >&2 || true
+  $KUBECTL -n "$NS" get events 2>/dev/null | grep -F "$JOB" | tail -20 >&2 || true
+fi
 
 RESULTS="$COLLX_DIR/results"
 mkdir -p "$RESULTS"

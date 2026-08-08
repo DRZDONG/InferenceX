@@ -50,9 +50,18 @@ class PlatformRegistryTests(unittest.TestCase):
                 ):
                     self.assertIsInstance(entry[field], str)
                     self.assertTrue(entry[field])
-                for field in ("gpus_per_node", "scale_up_domain"):
-                    self.assertIsInstance(entry[field], int)
-                    self.assertGreater(entry[field], 0)
+                self.assertIsInstance(entry["gpus_per_node"], int)
+                self.assertGreater(entry["gpus_per_node"], 0)
+                # `scale_up_domain` is an int for a hardware domain a larger job crosses
+                # (NVLink, xGMI), or the literal "ep" where the domain IS the provisioned
+                # slice and follows the EP degree. TPU needs the latter: ICI reaches every
+                # chip in a slice, so EP16 spans two hosts and is still scale-up.
+                domain = entry["scale_up_domain"]
+                if isinstance(domain, str):
+                    self.assertEqual(domain, "ep")
+                else:
+                    self.assertIsInstance(domain, int)
+                    self.assertGreater(domain, 0)
                 self.assertTrue(entry["backends"])
                 for degrees in entry["backends"].values():
                     self.assertTrue(degrees)

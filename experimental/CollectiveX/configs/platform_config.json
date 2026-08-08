@@ -206,12 +206,12 @@
       "image": "vllm/vllm-tpu:nightly",
       "image_platform": "linux/amd64",
       "gpus_per_node": 8,
-      "scale_up_domain": 8,
+      "scale_up_domain": "ep",
       "scale_up_transport": "ici",
       "scale_out_transport": "dcn",
       "launcher": "tpu-gke",
-      "backends": {"jax-ragged-a2a": [8]},
-      "fabric": {"nic": "n/a (single-host ICI slice)", "switch": "n/a (single-host 2x2x1 ICI slice)"}
+      "backends": {"jax-ragged-a2a": [8, 16]},
+      "fabric": {"nic": "n/a (ICI slice)", "switch": "n/a (ICI slice, sized to the EP degree)"}
     }
   }
 }

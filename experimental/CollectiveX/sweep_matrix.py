@@ -39,10 +39,12 @@ BACKEND_PRECISIONS = {
     # NCCL EP is BF16-only this release: its FP8 machinery exists upstream but RELEASE.md
     # lists it unsupported/untested, so no FP8 case is emitted (see bench/ep_nccl.py).
     "nccl-ep": ("bf16",),
-    # The TPU probe is BF16-only: it measures the interconnect collective itself
-    # (jax.lax.ragged_all_to_all) with no quantized dispatch path, so there is no FP8
-    # wire format to label (see bench/ep_jax.py).
-    "jax-ragged-a2a": ("bf16",),
+    # FP8 is dispatch-side only (blockwise e4m3fn with per-128-block FP32 scales, the same
+    # recipe as deepep-v2/uccl-ep/flashinfer-ep so the axis is comparable); combine stays
+    # BF16 because the expert emits BF16. TPU v7 is not the constraint here -- this repo
+    # already runs FP8 models on it (benchmarks/single_node/qwen3.5_fp8_tpuv7.sh) -- the
+    # earlier bf16-only entry was just the absence of a quantized dispatch path.
+    "jax-ragged-a2a": ("bf16", "fp8"),
 }
 # Short shard-ID slug per non-normal mode. Normal-mode shard IDs carry no mode
 # segment so existing references stay valid; a low-latency shard adds "-ll".
@@ -62,12 +64,44 @@ def _ll_runnable(platform: dict[str, Any], backend: str, ep: int) -> bool:
     return ep in platform.get("ll_backends", {}).get(backend, [])
 
 
+def _shard_precision_key(sku: str, nodes: int, precision: str) -> str:
+    """Which precisions share a shard.
+
+    Normally one shard per precision, so the legs run in parallel. A MULTI-HOST TPU slice
+    cannot do that: the whole slice is one indivisible allocation, so two shards each want
+    every node of it. Measured -- run 30942031527 ran the fp8 and bf16 EP16 shards
+    concurrently (19:10:38..19:21:02 and 19:10:41..19:26:06), four pods contended for the
+    two pod slots the 2x2x2 pool has, Kubernetes gave each Job ONE of its two pods, and both
+    half-formed slices aborted with:
+
+        Terminating the libtpu controller process because an anomalous TPUworker process is
+        detected: SLICE_FAILURE_SW_INJECT_ERROR
+
+    So multi-host TPU precisions share ONE shard and run as cases inside a single Job, which
+    is what the in-pod loop already does and what the once-per-process cluster join now
+    supports. Merging is preferable to scheduling around the clash: it removes the
+    contention rather than sequencing it, and it holds for a manually dispatched run too.
+    """
+    if nodes > 1 and PLATFORMS[sku]["launcher"] == "tpu-gke":
+        return "all"
+    return precision
+
+
 def _topology(platform: dict[str, Any], ep: int) -> dict[str, Any]:
     gpus_per_node = platform["gpus_per_node"]
     if ep % gpus_per_node:
         raise SystemExit(f"EP{ep} is not divisible by {gpus_per_node} GPUs per node")
     product = platform["product"]
     domain = platform["scale_up_domain"]
+    # `"ep"` means the scale-up domain IS the provisioned slice, sized to the EP degree.
+    # TPU needs this: ICI reaches every chip in a slice, and the slice is requested at the
+    # size the case wants, so EP16 spans two hosts and is STILL scale-up. A flat 8 would
+    # label it scale-out over DCN, which is false -- nothing leaves ICI inside one slice --
+    # and a flat 16 would over-claim the EP8 shard, whose slice really is 8 devices wide.
+    # GPU SKUs keep an integer: their NVLink/xGMI domain is a hardware boundary that a
+    # larger job crosses, which is exactly what `scale_out` should detect.
+    if domain == "ep":
+        domain = ep
     scale_up = platform["scale_up_transport"]
     # Scale-out fabric per SKU. Every GPU cluster here reaches other nodes over RDMA, so
     # that stays the default; a SKU on a different fabric (TPU hosts talk over Google's
@@ -221,7 +255,9 @@ def resolve_matrix(
                             })
                             if runnable:
                                 shards.setdefault(
-                                    (sku, target, mode, topology["nodes"], precision), []
+                                    (sku, target, mode, topology["nodes"],
+                                     _shard_precision_key(sku, topology["nodes"],
+                                                          precision)), []
                                 ).append(case)
 
     shards_by_sku: dict[str, list[dict[str, Any]]] = {}

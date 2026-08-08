@@ -8,7 +8,13 @@ node-local JAX compile cache (qwen3.5-397B cold-compiles ~1.5h).
 
 - **Project / cluster**: `<GCP_PROJECT_ID>` / `<GKE_CLUSTER>`, zone `<GCP_ZONE>`.
 - **TPU pool** `tpu-v7x`: 6× `tpu7x-standard-4t` (single-host, `2x2x1` = 4 chips each → 24 chips), pinned to `<TPU_RESERVATION>` via `--reservation-affinity=specific`.
+- **Multi-host TPU pool** `tpu-v7x-mh`: 2× `tpu7x-standard-4t` in ONE `2x2x2` slice (8 chips → 16 JAX devices), same reservation. Added for CollectiveX EP16, which needs 16 devices in one ICI domain. ICI spans hosts inside a slice, so EP16 here is **scale-up**, not scale-out over DCN.
 - **CPU pool** `default-pool`: 1× `e2-standard-4` (hosts the ARC coordinator + listener, no TPU).
+
+> The reservation is an aggregate 32 tpu7x chips. The two pools together use all of it (24 + 8), so
+> a third pool needs capacity freed or the reservation raised — check with
+> `gcloud compute reservations describe <TPU_RESERVATION> --zone=$ZONE`, whose `inUseResources`
+> counts only RUNNING instances.
 
 ## Architecture
 A thin **coordinator** ARC runner (CPU, no TPU) picks up each `runs-on: tpuv7` job and
@@ -35,6 +41,21 @@ gcloud container clusters create $CLUSTER --project=$PROJECT --location=$ZONE \
   --release-channel=rapid --num-nodes=1 --machine-type=e2-standard-4
 gcloud container node-pools create tpu-v7x --cluster=$CLUSTER --project=$PROJECT \
   --location=$ZONE --node-locations=$ZONE --machine-type=tpu7x-standard-4t --num-nodes=6 \
+  --reservation-affinity=specific --reservation=<TPU_RESERVATION>
+
+# 0b. MULTI-HOST pool for CollectiveX EP16 (16 JAX devices in one ICI domain). The obvious
+#     command FAILS here: --tpu-topology alone creates a PLACEMENT policy and tpu7x rejects
+#     it with "Creation of a managed instance group with tpu7x-standard-4t machine type with
+#     placement policy is not supported. Use workload policy instead." So create an explicit
+#     WORKLOAD policy first and pass it. (This is the multi-host counterpart of the
+#     single-host note above: there, --tpu-topology must be OMITTED; here it must be
+#     accompanied.)
+gcloud compute resource-policies create workload-policy collx-tpuv7-mh \
+  --project=$PROJECT --region=${ZONE%-*} \
+  --type=HIGH_THROUGHPUT --accelerator-topology=2x2x2
+gcloud container node-pools create tpu-v7x-mh --cluster=$CLUSTER --project=$PROJECT \
+  --location=$ZONE --node-locations=$ZONE --machine-type=tpu7x-standard-4t --num-nodes=2 \
+  --tpu-topology=2x2x2 --placement-policy=collx-tpuv7-mh \
   --reservation-affinity=specific --reservation=<TPU_RESERVATION>
 gcloud container clusters get-credentials $CLUSTER --location=$ZONE --project=$PROJECT
 

@@ -23,10 +23,10 @@ on:
         description: Keep only shards whose expert-parallel degree is in this comma-list (8 keeps EP8 only, dropping EP16 so GB SKUs co-schedule with 8-GPU SKUs; blank = all)
         type: string
         default: ''
-      tpu_xprof:
-        description: "TPU only: also capture a profiler trace and publish device-side durations (the only latencies free of the host dispatch floor)"
-        type: boolean
-        default: false
+      tpu_xprof_iters:
+        description: "TPU only: profiled calls per component per traced ladder point. Capture itself is NOT optional -- device spans are the published latency and a point without them fails the case."
+        type: string
+        default: '20'
       modes:
         description: "Keep only shards in this comma-list of modes (normal, low-latency); low-latency is a decode-only EP8 addition; blank = all"
         type: string
@@ -134,7 +134,17 @@ jobs:
       COLLX_SCALE_UP_DOMAIN: ${{ matrix.scale_up_domain }}
       COLLX_SHARD_FILE: .shards/${{ matrix.id }}.json
       COLLX_SHARD_SKU: ${{ matrix.sku }}
-      COLLX_TPU_XPROF: ${{ inputs.tpu_xprof && '1' || '0' }}
+      # Capture is unconditional (see launch_tpu-gke.sh); only the occurrence count is
+      # tunable. 20 is what every validated run used, including the all-green 30992679155.
+      # Passing nothing here would fall back to the entrypoint's own default of 30, which is
+      # how a default dispatch silently differed from a tpu_xprof=true one.
+      COLLX_TPU_XPROF_ITERS: ${{ inputs.tpu_xprof_iters || '20' }}
+      # The multi-host tpu7x slice EP16 needs. Keyed by host count because ONE coordinator
+      # runs both shards: EP8 (1 host) must keep the 2x2x1 default while EP16 (2 hosts) gets
+      # this. Declared, never derived -- a topology no node pool provides schedules a pod
+      # that pends forever. The pool backing it is `tpu-v7x-mh`, created with an explicit
+      # WORKLOAD policy (see launch_tpu-gke.sh; --tpu-topology alone is rejected on tpu7x).
+      COLLX_TPU_TOPOLOGY_N2: 2x2x2
       COLLECTIVEX_CANONICAL_GHA: '1'
       COLLECTIVEX_SOURCE_SHA: ${{ github.sha }}
       # Consolidated shards run one bounded build-group in one Slurm allocation;

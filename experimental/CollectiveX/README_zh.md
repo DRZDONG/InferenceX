@@ -187,28 +187,27 @@ Slurm、没有 enroot/pyxis、也没有共享文件系统，因此 `launchers/la
 的每个 case 都能复用节点本地的 XLA 编译缓存，并通过 pod log 取回结果 JSON。失败或部分完成
 的 leg 仍会上传它已经产出的内容。
 
-有三项性质刻意弱于 GPU 系列，且每一项都在 artifact 中标明：
+有两项性质与 GPU 系列不同，且每一项都在 artifact 中标明：
 
-- `measurement.timing_source` 为 `host-wallclock-blocked...`。JAX 没有等价于
-  `torch.cuda.Event` 的公开接口，因此延迟是围绕 jit 程序 `block_until_ready` 的主机
-  wall-clock 时间，包含了 CUDA event 计时所排除的主机 dispatch 开销。在 tpu7x 上实测该开销
-  为**每次调用约 500 µs 的固定下限**——在 T=1 时约占读数的 98%，这使 ladder 的小 token
-  端失去意义。
+- `measurement.timing_source` 为 **`xla-device-trace-span`**。JAX 没有等价于
+  `torch.cuda.Event` 的公开接口，因此本 probe 改从 XLA profiler trace 读取设备时间：取
+  **span**（component scope 的首个 start 到最后一个 end，而非各 op 时长之和），跨设备按
+  **MAX** 归约（按 occurrence），并使用原始百分位。这与 GPU SKU 的 CUDA event 属于同一
+  *类型*的数字——芯片时间，不含主机 dispatch 开销。
 
-  因此该 probe 默认进行**摊销**：`--in-program-iters N`（默认取该 case 自身的 `--iters`，
-  使每个 trial 只有一次计时调用）在单个 jit 程序内串联 N 次相同操作，从而把该下限除以 N。
-  每次迭代的 carry 都经过 `jax.lax.optimization_barrier`：它保持数值不变，同时建立数据
-  依赖，阻止 XLA 把这 N 次调用做公共子表达式消除合并为一次——若缺少该依赖，串联会报出一个
-  虚假的快速数值，因此缺少该 barrier 的 JAX build 会直接失败而不是继续摊销。
-  `--in-program-iters 1` 可关闭摊销（在 runner 上通过 `COLLX_TPU_IN_PROGRAM_ITERS`）。
+  主机 wall-clock 仍以每行的 `host_latency_us` 作为交叉校验，并作为**需显式开启**的回退
+  （`--allow-host-fallback`）。它绝不作为头条数字：其每次调用的 dispatch 下限与负载相关，
+  可达数千微秒；因此某个点若拿不到设备 span，该 case 直接失败，而不会悄然发布一个主机数字
+  冒充可比的结果。计时来源**按 component 记录**（`row.timing_source`），因为 profiler 可能
+  覆盖部分 component 而遗漏其他。
 
-  代价是统计性的，并且被记录而非隐藏：当 N > 1 时，每个样本是 N 次连续操作的**均值**，因此
-  `p99` 不再反映单次慢操作。`timing_source` 变为
-  `host-wallclock-blocked-amortized-xN`，`sampling.in_program_iterations` 记录 N，使消费方
-  无需阅读代码即可区分两者。摊销同时把主机调用次数除以 N（N=8 时每个 component 从 10,240 次
-  降到 1,280 次），这正是让 prefill ladder 保持在 wall-clock 预算内的原因。
-- `components.stage` 为 `unavailable`：permute 已融合进 dispatch，没有独立的 staging
-  pass 可计时。Per-destination layout（offset、size、gather index）在主机侧预先计算并排除
+  早先的版本改用**摊销**（在单个程序内串联 N 次操作以摊薄主机下限，`--in-program-iters`）。
+  设备 span 使其不再必要，该标志已从代码中移除；若在别处看到对它的引用，那处引用已过时。
+- `components.stage` 在 **BF16 行**上为 `unavailable`：permute 已融合进 dispatch，且不存在
+  精度转换，没有独立的 staging pass 可计时。**FP8 行会发布 `stage`**——即 fp8→bf16 转换，
+  它被提出到 combine 与链式 roundtrip 之外单独计时，这正是 `roundtrip + stage` 能重建
+  mismatched-config 成本的原因。与 GPU 的 `native` 行比较时不要把 `stage` 加进 `roundtrip`；
+  与 `CX_FP8_CONSUME=dequant` 行比较时才需要相加。Per-destination layout（offset、size、gather index）在主机侧预先计算并排除
   在计时区间之外，与 DeepEP layout pass 的处理方式一致；而设备上的 permute gather 与
   combine 的 scatter-add **在**计时区间内，因为生产路径同样要付出这部分代价。
 - `implementation.oracle` 为 `probe-source-identity-and-exact-rank-sum`，比 GPU harness
@@ -216,6 +215,73 @@ Slurm、没有 enroot/pyxis、也没有共享文件系统，因此 `launchers/la
   都会被解码回它所声称的 source token 并做逐位比较，其落位 offset 会与 exchange plan 校
   验，combine 结果会与精确的期望 unweighted rank-sum 比较。由于 expert 取恒等映射，因此
   不建模 per-expert transform。
+
+### 链式 pair period
+
+`pair_period` 与 `roundtrip` 是**不同的量**：前者是永不排空的流水线中一对
+dispatch→combine 的稳态周期，后者是从空闲进入的单对延迟。不要相加，也不要互相替代。
+`--chain-iters`（默认 64）对在同一个编译程序内运行，每次迭代的结果作为下一次的输入 ——
+这是真实的数据依赖，而非 `optimization_barrier`：barrier 只约束顺序而不保证存活，XLA 会
+直接删除无人消费的计算。
+
+**链式程序必须做重归一化。** combine 是无权重的 rank-sum，因此一对会把 token `t` 乘以
+`d_t`（其唯一目标 rank 数）—— 对 deepseek-v3 top-8 实测 EP8 为 3..7，EP16 为 4..8。
+64 次迭代即 `d_t**64`，而 bf16 上限为 3.39e38：不做归一化时第 43 次迭代出现第一个溢出，
+**EP16 在第 64 次时 100% 的元素为 inf**。循环体在转回 bf16 之前用 fp32 除以 `d_t`，使
+一对恰好成为**逐位**恒等（`d_t ≤ 8` 个 bf16 值的 fp32 求和是精确的，IEEE 除法为正确舍入）。
+下发的是计数而非 `1/d`：实测 20 万个值中，`(d*v)*float32(1/d)` 在 `d == 7` 时有 58% 与 `v`
+不符，而两种布局中都存在 7 个目标 rank 的 token。
+
+`correctness.chain_regime_passed` 即该恒等校验，在被计时的程序上评分并跨主机归约。
+**三态**：`true` 通过；`false` 表示校验已运行且不一致（该行判为失败）；`null` 表示无法
+评估（撤下 period，但不牵连同一 case 中已测得的 drained 组件）。drained oracle 无法覆盖
+该状态 —— 它只检查从空闲进入的单对，因此仅在自由运行时损坏的传输会表现为全套中最快的。
+
+`chain_floor_us` 按方向分别发布，`origin: chained-cross-rank-min`。候选为每设备恰好出现
+`--chain-iters` 次的 collective；随后按其出现的 device row 集合分组，锚点取自**总时长最高
+且本身就能配对（成员 ≥2）的那个 row 组**中时长最高的两个 op。按 row 分组是两个锚点可比的
+前提：tpu7x 有多种核心，只在部分 row 上出现的 `sparse-core-…` op 可能在总时长上胜出，而
+落在大小相同却**互不相交**的 row 集合上的两个 op 无论多大都不构成一对 —— 按 row 集合
+**大小**择优的规则只在 10 个点中的 2 个发布了 floor，比它取代的 5/10 更差。「成员 ≥2」
+这一条另有作用：否则一个独占 sparse-core row 的大 op 会凭总时长胜出，该点最终因只剩单个
+候选而失败。入选的一对还须呈 d,c,d,c 交错。方向由每次迭代的起始顺序确定。
+任一条件不满足时，**两个**方向均发布 `unavailable` 并附原因；此处的 null 表示"未测量"，
+绝不表示"与另一个相同"。`chain_health.anchor.phase` 给出 combine 锚点在周期中的相位 ——
+~0.5 为真实配对，~0 或 ~1 表示两个锚点同属一个方向，而仅靠交错检查无法区分这一情形。
+
+**移植到新 SKU 时值得做的交叉验证：** 若两个锚点确为前后相接的 dispatch 与 combine，
+则 `phase` 应当跟随 `chain_floor_us.dispatch / pair_period` —— 因为 combine 正是在
+dispatch 的 collective 结束时开始。二者来自相互独立的量（前者取自起始时间戳，后者取自
+op 时长），因此二者吻合可以证明方向**标签**正确，而不仅仅是自洽。bf16 实测
+（run 31194062843），跨 128 倍规模范围与两种 EP 规模：
+
+| T | `floor_dispatch / period` EP8 | `phase` EP8 | `floor_dispatch / period` EP16 | `phase` EP16 |
+|--:|--:|--:|--:|--:|
+| 64 | 0.321 | 0.361 | 0.332 | 0.365 |
+| 512 | 0.276 | 0.294 | 0.287 | 0.311 |
+| 8192 | 0.265 | 0.280 | 0.271 | 0.286 |
+
+全部 28 个链式行上 `phase` 均略高于该比值（最大差 0.064），符号正是预期的：floor 取跨 rank
+的 **min**，而 phase 测自真正决定链节奏的那个设备。若 `phase` 不跟随该比值，则无论交错多么
+整齐，这两个锚点都不是两个方向。
+
+`chain_health` 与 GPU 系列的块结构一致（每个字段是带 `percentiles_us` 的 component，
+而非裸浮点数）：
+
+| 字段 | 含义 |
+|---|---|
+| `interpair_gap_us` | start-to-start 减去每次迭代中 chain scope 自身的跨度。接近零即自由运行。**实测 0.0–0.2 µs，占周期 0.0–0.1%**（EP8 与 EP16）。既不是两个 collective floor 之差，也不是 op 求和 —— 两者都把 permute 与 scatter-add 留在"gap"里，分别读出 47% 与 20–30%。 |
+| `settle_drift_us` | 各设备后半段与前半段 p50 之差，按带符号最大幅值归约。用于支持或推翻 `--chain-drop`。实测 ≤0.6 µs。 |
+| `pair_spread_us` | 每次迭代的跨设备离散度。 |
+| `devices` / `devices_expected` | EP16 下每个进程只能采集自己的 8 张卡，因此在归约前对逐设备周期矩阵做 allgather —— 缺失的那一半正是跨主机 straggler 所在。`gathered_across_hosts` 表示是否已聚合；`devices_expected` 诚实地保持为 16。 |
+| `op_inventory` | 链式循环体内每个 op 的逐迭代耗时。这使 fp8 的排除成为可核查的事实而非论断。 |
+| `renorm_us` | **`unavailable`，且属预期**：XLA 将该除法融合进相邻的 cast，没有 op 携带该 scope。其代价由跨运行差分限定在周期的 ≤0.05%，而非直接测得。 |
+| `capture_s` / `capture_budget_s` | 链式采集相对 launcher 自身每 case 超时的开销。实测 13–22 秒 / 2700 秒。 |
+
+**fp8 有意不做链式测量。** 其 combine 需要 BF16，因此链式 fp8 循环体必须把 fp8→bf16 转换
+放进循环内，周期就会包含 `native` 契约认定生产环境并不单独执行的工作。fp8 行的
+`implementation.chained_period` 为 `false`，链式字段为 `unavailable` 并附该原因 ——
+而不是悄悄缺失。
 
 工作负载身份**与** GPU 系列共享：`bench/routing_np.py` 是 `bench/routing.py` 的 numpy
 移植并有 parity 测试（TPU 镜像没有可用的 torch），因此两个系列使用完全相同的 routing trace
