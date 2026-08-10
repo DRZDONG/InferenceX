@@ -147,6 +147,7 @@ else:
     single_node_data = {
         'is_multinode': False,
         'tp': tp_size,
+        'dp': dp_size,
         'ep': ep_size,
         'dp_attention': dp_attention,
         'num_gpus': num_gpus,

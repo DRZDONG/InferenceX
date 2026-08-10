@@ -187,6 +187,7 @@ class TestProcessResultScript:
         # Verify single-node specific fields
         assert output_data["is_multinode"] is False
         assert output_data["tp"] == 8
+        assert output_data["dp"] == 1
         assert output_data["ep"] == 1
         assert output_data["dp_attention"] == "false"
 
@@ -243,25 +244,37 @@ class TestProcessResultScript:
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / 8)  # decode gpus
         assert output_data["input_tput_per_gpu"] == pytest.approx((15000.5 - 12000.0) / 20)  # prefill gpus
 
-    def test_tpuv7_single_node_counts_data_parallel_cores(
-        self, tmp_path, sample_benchmark_result, base_env_vars
+    @pytest.mark.parametrize(
+        ("concurrency", "tp", "dp"),
+        [
+            (64, 2, 4),
+            (128, 1, 8),
+            (256, 1, 8),
+        ],
+    )
+    def test_tpuv7_single_node_preserves_data_parallelism(
+        self, tmp_path, sample_benchmark_result, base_env_vars, concurrency, tp, dp
     ):
-        """TPU v7 exposes two logical devices per chip across TP and DP."""
+        """TPU v7 artifacts preserve DP while normalizing logical devices to physical chips."""
         env = {
             **base_env_vars,
             "RUNNER_TYPE": "tpuv7",
             "FRAMEWORK": "vllm",
             "DISAGG": "false",
-            "TP": "1",
-            "DP": "8",
+            "TP": str(tp),
+            "DP": str(dp),
             "EP_SIZE": "1",
             "DP_ATTENTION": "false",
         }
-        result = run_script(tmp_path, env, sample_benchmark_result)
+        benchmark_result = {**sample_benchmark_result, "max_concurrency": concurrency}
+        result = run_script(tmp_path, env, benchmark_result)
         assert result.returncode == 0, f"Script failed: {result.stderr}"
         output_data = json.loads(result.stdout)
 
-        chips = 4  # TP=1 × DP=8 logical devices / 2 cores per physical chip
+        chips = 4  # Eight logical devices / two cores per physical TPU v7 chip
+        assert output_data["conc"] == concurrency
+        assert output_data["tp"] == tp
+        assert output_data["dp"] == dp
         assert output_data["num_gpus"] == chips
         assert output_data["tput_per_gpu"] == pytest.approx(15000.5 / chips)
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / chips)
