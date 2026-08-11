@@ -5325,3 +5325,10 @@
   description:
     - "Fix TPU v7 Kubernetes Job manifest generation and workflow result collection."
   pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/8
+
+- config-keys:
+    - qwen3.5-fp8-tpu7x-vllm
+  description:
+    - "Update vLLM image tag to us-central1-docker.pkg.dev/ironwood-496417/torchtpu-vllm/torchtpu-vllm-prod:nightly-20260810"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/12
+
