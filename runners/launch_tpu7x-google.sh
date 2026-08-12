@@ -183,6 +183,7 @@ ${INIT_CONTAINERS}
       containers:
         - name: bench
           image: ${IMAGE_RESOLVED}
+          imagePullPolicy: Always
           workingDir: /workdir
           command: ["bash","-c"]
           args:
