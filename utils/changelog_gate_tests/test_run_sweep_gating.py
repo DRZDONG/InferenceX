@@ -51,8 +51,6 @@ POLICY_LABELS = {
 RELEVANT_LABELS = SWEEP_LABELS | MODIFIER_LABELS | POLICY_LABELS
 REUSE_ELIGIBLE_LABELS = SWEEP_LABELS - {"sweep-enabled"}
 REUSE_INCOMPATIBLE_LABELS = {"evals-only", "agentx-fast"}
-ZERO_SHA = "0" * 40
-NONZERO_SHA = "1" * 40
 
 
 # --------------------------------------------------------------------------
@@ -203,13 +201,17 @@ def _eval(expr: str, ctx: dict) -> bool:
 def _ctx(sc: dict) -> dict:
     return {
         "github.event_name": sc["event"],
+        "github.event.created": sc.get("created", False),
+        "github.repository": "SemiAnalysisAI/InferenceX",
         "github.event.action": sc.get("action"),
         "github.event.pull_request.draft": sc.get("draft", False),
+        "github.event.pull_request.head.repo.full_name": sc.get(
+            "head_repo", "SemiAnalysisAI/InferenceX"
+        ),
         "github.event.pull_request.labels.*.name": sc.get("labels", []),
         "github.event.label.name": sc.get("label_name"),
         "vars.PRIORITY_SCHEDULER_ENABLED": sc.get("scheduler_enabled", "true"),
         "github.event.head_commit.message": sc.get("msg", ""),
-        "github.event.before": sc.get("before", NONZERO_SHA),
     }
 
 
@@ -289,6 +291,10 @@ CASES = [
     ("PR-sync-no-sweep-label",
      {**_PR, "action": "synchronize", "labels": []},
      ("success", "skipped", "SKIP")),
+    ("PR-sync-external-fork-defers-to-trusted-dispatch",
+     {**_PR, "action": "synchronize", "labels": ["full-sweep-enabled"],
+      "head_repo": "external/InferenceX"},
+     ("success", "success", "SKIP")),
     ("PR-labeled-with-sweep-label",
      {**_PR, "action": "labeled", "label_name": "full-sweep-enabled",
       "labels": ["full-sweep-enabled"]}, ("success", "skipped", "RUN")),
@@ -351,8 +357,8 @@ CASES = [
     ("push-skip-sweep-tag-ignored",
      {"event": "push", "msg": "fix: x [skip-sweep]"},
      ("skipped", "skipped", "RUN")),
-    ("push-root-commit-skips-historical-changelog",
-     {"event": "push", "msg": "chore: initialize repository", "before": ZERO_SHA},
+    ("push-created-ref-skips-root-sweep",
+     {"event": "push", "created": True, "msg": "chore: initialize main"},
      ("skipped", "skipped", "SKIP")),
 ]
 
@@ -470,6 +476,9 @@ def reference_gate(sc: dict) -> tuple[str, str, str]:
     labels = set(sc.get("labels", []))
     draft = sc.get("draft", False)
     is_pr = sc["event"] == "pull_request"
+    is_internal_pr = sc.get("head_repo", "SemiAnalysisAI/InferenceX") == (
+        "SemiAnalysisAI/InferenceX"
+    )
     action = sc.get("action")
 
     check_runs = (
@@ -505,12 +514,13 @@ def reference_gate(sc: dict) -> tuple[str, str, str]:
         )
         event_ok = (
             (not draft)
+            and is_internal_pr
             and bool(labels & SWEEP_LABELS)
             and action_ok
             and "[skip-sweep]" not in sc.get("msg", "")
         )
     else:
-        event_ok = sc.get("before", NONZERO_SHA) != ZERO_SHA
+        event_ok = not sc.get("created", False)
 
     check_clause = check in ("success", "skipped")
     runs = check_clause and reuse_clause and event_ok
@@ -571,10 +581,10 @@ def _all_scenarios() -> list[dict]:
         for a, d, labs, ln, r, chk, msg in pr_axes
     ]
     scenarios += [
-        {"event": "push", "msg": msg, "before": before}
-        for msg, before in itertools.product(
+        {"event": "push", "created": created, "msg": msg}
+        for created, msg in itertools.product(
+            [False, True],
             ("feat: add model", "fix: thing [skip-sweep]"),
-            (NONZERO_SHA, ZERO_SHA),
         )
     ]
     return scenarios

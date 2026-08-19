@@ -27,3 +27,6 @@ image = "vllm/vllm-openai-rocm:v0.19.0"
 
 [tpu.jax]
 image = "us-central1-docker.pkg.dev/jax-image-build/jax-tpu/jax-tpu:latest"
+
+[trainium.neuronx]
+image = "public.ecr.aws/neuron/pytorch-training-neuronx:2.5.1-neuronx-py310-sdk2.21.0-ubuntu22.04"

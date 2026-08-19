@@ -73,7 +73,7 @@ def activations_for_source_ids(source, hidden: int, seed: int, dtype=torch.bfloa
     # Integer lattice, frozen (the oracle regenerates these exact bytes):
     # 131/17/19 are odd multipliers coprime to the prime modulus 257, so  distinct (source, column, seed)
     # land on distinct residues and corruption cannot alias into a correct-looking pattern; %257-128 yields k in
-    # [-128, 128] and k/64 is exactly representable in bfloat16, so the oracle's bit-exact payload compare sees
+    # [-128, 128] and k/64 is exactly representable in bfloat16, so the oracle's bit-exact payload compare sees 
     # transport corruption, never representation error.
     values = (source[:, None] * 131 + column[None, :] * 17 + int(seed) * 19) % 257 - 128
     output = values.to(dtype).mul_(1 / 64)

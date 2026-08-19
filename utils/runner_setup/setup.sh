@@ -15,7 +15,7 @@ END="$4"
 BASE_DIR="$5"
 BASE_RUNNER_NAME="$6"
 ADDITIONAL_RUNNER_TAGS="$7"
-REPO_URL="${8:-https://github.com/SemiAnalysisAI/InferenceX-Private-TPU}"
+REPO_URL="${8:-https://github.com/SemiAnalysisAI/InferenceX}"
 RUNNER_TAR=$(basename "$RUNNER_URL")
 
 # Download the tarball once

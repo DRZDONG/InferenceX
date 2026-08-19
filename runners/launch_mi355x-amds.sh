@@ -78,7 +78,15 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
 
     SCRIPT_NAME="${EXP_NAME%%_*}_${PRECISION}_mi355x_${FRAMEWORK}.sh"
     if [[ "$FRAMEWORK" == "sglang-disagg" ]] || [[ "$FRAMEWORK" == "vllm-disagg" ]] || [[ "$FRAMEWORK" == "atom-disagg" ]]; then
-        BENCHMARK_SUBDIR="multi_node"
+        # Agentic recipes live under multi_node/agentic/ and export the
+        # HiCache tunables (page-size, io-backend, ...); fixed-seq-len recipes
+        # live at the multi_node/ root. Honor SCENARIO_SUBDIR so agentic-coding
+        # configs pick the agentic recipe instead of the root one.
+        if [[ "${SCENARIO_SUBDIR}" == "agentic/" ]]; then
+            BENCHMARK_SUBDIR="multi_node/agentic"
+        else
+            BENCHMARK_SUBDIR="multi_node"
+        fi
     else
         BENCHMARK_SUBDIR="single_node/fixed_seq_len"
     fi
@@ -126,7 +134,7 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
     # search for "FRAMEWORK_DIFF_IF_STATEMENT #3" for this if-statement
     # Find the latest log directory that contains the data
 
-    if [[ "${EVAL_ONLY:-false}" != "true" ]]; then
+    if [[ "${EVAL_ONLY:-false}" != "true" && "${IS_AGENTIC:-0}" != "1" ]]; then
         cat > collect_latest_results.py <<'PY'
 import os, sys
 job_dir, isl, osl, nexp, framework = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
@@ -172,12 +180,62 @@ PY
             shopt -s nullglob
             for eval_file in "$EVAL_DIR"/*; do
                 [ -f "$eval_file" ] || continue
-                cp "$eval_file" "$GITHUB_WORKSPACE/"
-                echo "Copied eval artifact: $(basename "$eval_file")"
+                eval_dest="$GITHUB_WORKSPACE/$(basename "$eval_file")"
+                rm -f "$eval_dest"
+                # Eval artifacts are created as root inside the container; sudo
+                # is required to overwrite any stale root-owned files in the
+                # workspace from prior runs on this runner.
+                if sudo cp "$eval_file" "$eval_dest"; then
+                    sudo chown "$(id -u):$(id -g)" "$eval_dest" 2>/dev/null || true
+                    echo "Copied eval artifact: $(basename "$eval_file")"
+                else
+                    echo "ERROR: failed to copy eval artifact: $(basename "$eval_file")" >&2
+                    exit 1
+                fi
             done
             shopt -u nullglob
         else
             echo "WARNING: RUN_EVAL=true but no eval results found under $BENCHMARK_LOGS_DIR/logs"
+        fi
+    fi
+
+    # Stage agentic raw artifacts + server logs for the CI upload steps.
+    # server_sglang.sh copies /run_logs/slurm_job-<id> to
+    # $BENCHMARK_LOGS_DIR/logs/slurm_job-<id> on shared storage, and
+    # trace_replay.sh writes each concurrency's aiperf artifacts under
+    # agentic/conc_<N>/ (mirroring agentic_srt.sh). benchmark-multinode-tmpl.yml
+    # uploads them from $GITHUB_WORKSPACE/LOGS/agentic/conc_*/... plus a
+    # multinode_server_logs.tar.gz, so preserve the conc_<N>/ nesting here
+    # before the logs dir is removed below. The agg result JSON is already
+    # written straight to the mounted workspace by the existing agentic
+    # aggregation module.
+    if [[ "${IS_AGENTIC:-0}" == "1" ]]; then
+        JOB_LOGS_DIR="$BENCHMARK_LOGS_DIR/logs/slurm_job-${JOB_ID}"
+        if [ -d "$JOB_LOGS_DIR" ]; then
+            # trace_replay.sh always nests artifacts under agentic/conc_<N>/.
+            # Copy the whole agentic/ tree so the conc_<N>/ subdirs are
+            # preserved for the LOGS/agentic/conc_*/... upload globs.
+            AGENTIC_SRC="$JOB_LOGS_DIR/agentic"
+            if [ -d "$AGENTIC_SRC" ] && find "$AGENTIC_SRC" -mindepth 1 -maxdepth 1 -type d -name 'conc_*' -print -quit 2>/dev/null | grep -q .; then
+                echo "Staging agentic raw artifacts from $AGENTIC_SRC"
+                mkdir -p "$GITHUB_WORKSPACE/LOGS/agentic"
+                cp -r "$AGENTIC_SRC"/. "$GITHUB_WORKSPACE/LOGS/agentic/"
+                # Container artifacts arrive root-owned; chown/chmod so git clean
+                # and later jobs (possibly a different runner user) can remove LOGS/.
+                sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/LOGS" 2>/dev/null || true
+                chmod -R a+rwX "$GITHUB_WORKSPACE/LOGS" 2>/dev/null || true
+                ls -laR "$GITHUB_WORKSPACE/LOGS/agentic"
+            else
+                echo "WARNING: no agentic conc_*/ artifacts found under $JOB_LOGS_DIR/agentic"
+            fi
+            # Server/router/prefill/decode logs for the multinode_server_logs_* artifact.
+            if tar czf "$GITHUB_WORKSPACE/multinode_server_logs.tar.gz" -C "$JOB_LOGS_DIR" . 2>/dev/null; then
+                echo "Created multinode_server_logs.tar.gz"
+            else
+                echo "WARNING: failed to create multinode_server_logs.tar.gz"
+            fi
+        else
+            echo "WARNING: agentic staging skipped; $JOB_LOGS_DIR not found"
         fi
     fi
 
@@ -205,12 +263,10 @@ else
     SQUASH_FILE="/var/lib/squash/$(echo "$IMAGE" | sed 's/[\/:@#]/_/g').sqsh"
     LOCK_FILE="${SQUASH_FILE}.lock"
 
+    export GPU_COUNT="${GPU_COUNT:-${TP:?TP must be set}}"
+
     set -x
-    # Exclude known-bad mi355x compute nodes (KLAUD_DEBUG §5.1 / §5.2):
-    #   mia1-p01-g09: pyxis broken (persistently fails to create container filesystem)
-    #   mia1-p01-g11: docker.sock permissions denied (cluster-cleanup step fails)
-    # Both have been root-caused via #1431/#1432/#1440/#1441/#1443 sweep failures.
-    salloc --partition=$PARTITION --exclude=mia1-p01-g09,mia1-p01-g11 --gres=gpu:$TP --exclusive --cpus-per-task=128 --time=500 --no-shell --job-name="$RUNNER_NAME"
+    salloc --partition=$PARTITION --gres=gpu:$GPU_COUNT --exclusive --cpus-per-task=128 --time=500 --no-shell --job-name="$RUNNER_NAME"
     JOB_ID=$(squeue --name="$RUNNER_NAME" -h -o %A | head -n1)
 
     srun --jobid=$JOB_ID bash -c "docker stop \$(docker ps -a -q)"
@@ -266,6 +322,7 @@ else
         --container-remap-root \
         --no-container-entrypoint --export=ALL,AIPERF_DATASET_MMAP_CACHE_DIR=/aiperf_mmap_cache \
         bash "$BENCHMARK_SCRIPT"
+    benchmark_rc=$?
 
     scancel $JOB_ID
 
@@ -273,4 +330,6 @@ else
         echo "gpucore files exist. not good"
         rm -f gpucore.*
     fi
+
+    exit "$benchmark_rc"
 fi

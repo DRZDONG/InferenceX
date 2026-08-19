@@ -2,10 +2,10 @@
 #SBATCH -p h200
 #SBATCH --gres=gpu:8
 #SBATCH --container-image=vllm/vllm-openai:nightly
-#SBATCH --container-mounts=/mnt/home/user/inferperf/minimax-m2.5:/workspace,/mnt/vast/model_weights/minimax-m2.5:/model_storage
+#SBATCH --container-mounts=/mnt/home/kimbo/inferperf/minimax-m2.5:/workspace,/mnt/vast/model_weights/minimax-m2.5:/model_storage
 #SBATCH --no-container-entrypoint
 #SBATCH --job-name=vllm-minimax-m25-tp
-#SBATCH --output=/mnt/home/user/inferperf/minimax-m2.5/logs/vllm-server-tep8.log
+#SBATCH --output=/mnt/home/kimbo/inferperf/minimax-m2.5/logs/vllm-server-tep8.log
 #SBATCH --open-mode=append
 
 # Persistent vLLM server for MiniMax M2.5 (tensor-parallel + expert-parallel)

@@ -261,7 +261,7 @@ def main() -> int:
     canonicalize.add_argument("--pr-number", required=True, type=int)
     canonicalize.add_argument(
         "--repo",
-        default="SemiAnalysisAI/InferenceX-Private-TPU",
+        default="SemiAnalysisAI/InferenceX",
     )
 
     resolve = subparsers.add_parser("resolve-conflict")
@@ -269,7 +269,7 @@ def main() -> int:
     resolve.add_argument("--pr-number", required=True, type=int)
     resolve.add_argument(
         "--repo",
-        default="SemiAnalysisAI/InferenceX-Private-TPU",
+        default="SemiAnalysisAI/InferenceX",
     )
 
     args = parser.parse_args()

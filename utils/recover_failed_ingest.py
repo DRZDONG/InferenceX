@@ -25,7 +25,7 @@ from validate_perf_changelog import (
 )
 
 
-DEFAULT_REPO = "SemiAnalysisAI/InferenceX-Private-TPU"
+DEFAULT_REPO = "SemiAnalysisAI/InferenceX"
 RUN_URL = re.compile(
     r"^https://github\.com/(?P<repo>[^/]+/[^/]+)/actions/runs/"
     r"(?P<run_id>\d+)(?:/job/(?P<job_id>\d+))?/?(?:\?.*)?$"
@@ -492,7 +492,9 @@ def build_config(
         )
         + len(config.get("multi_node", {}).get("agentic", []) or []),
         "eval_jobs": len(config.get("evals", []) or [])
-        + len(config.get("multinode_evals", []) or []),
+        + len(config.get("agentic_evals", []) or [])
+        + len(config.get("multinode_evals", []) or [])
+        + len(config.get("multinode_agentic_evals", []) or []),
     }
 
 

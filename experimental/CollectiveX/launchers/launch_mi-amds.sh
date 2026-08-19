@@ -21,6 +21,7 @@ case "$RUNNER" in
   *) collx_die "COLLX_SHARD_SKU is not a registered AMD SKU" ;;
 esac
 export COLLX_RUNNER="$RUNNER" COLLX_BENCH="${COLLX_BENCH:-mori}"
+export COLLX_VENDOR=amd
 # ---- setup: operator config, canonical env, topology, network profile -------
 collx_launcher_prologue "$RUNNER"
 
@@ -50,7 +51,6 @@ if [ "$NODES" -gt 1 ]; then
 else
   export COLLX_TRANSPORT=xgmi
 fi
-export COLLX_RUN_TIMEOUT="${COLLX_RUN_TIMEOUT:-1800}"
 collx_apply_network_profile "$NODES" "$COLLX_TRANSPORT"
 collx_require_vars COLLX_IMAGE COLLX_IMAGE_PLATFORM COLLX_PARTITION COLLX_SQUASH_DIR COLLX_STAGE_DIR
 PARTITION="$COLLX_PARTITION"; SQUASH_DIR="$COLLX_SQUASH_DIR"

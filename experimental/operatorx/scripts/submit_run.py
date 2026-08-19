@@ -42,6 +42,7 @@ DEFAULT_CLUSTER = {
     "nvidia": "b200_dgx_8x",
     "amd":    "mi355x_8x",
     "tpu":    "v6e_4x",
+    "trainium": "trn3_16x",
 }
 
 

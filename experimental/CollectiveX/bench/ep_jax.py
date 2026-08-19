@@ -282,6 +282,7 @@ class JaxEPTransport:
     """Dispatch/combine over one 1-D device mesh, for a single ladder point."""
 
     name = "jax-ragged-a2a"
+    maturity = "candidate"
     combine_weight_semantics = "unweighted-rank-sum"
     dispatch_dtype = "bf16"
     combine_dtype = "bf16"

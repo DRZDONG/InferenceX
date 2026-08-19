@@ -2,258 +2,369 @@
 
 # CollectiveX
 
-CollectiveX 是实验性的混合专家（MoE）专家并行（EP）通信基准测试。它测量不同 EP
-库和加速器系统上的 dispatch、combine 及成对 roundtrip 延迟，并上传中立的结果产物。
+CollectiveX 是一个实验性的 MoE 专家并行通信基准测试。它测量不同 EP 库和加速器系统上的 dispatch、
+combine 以及配对 roundtrip 延迟，然后上传中立的结果产物。
 
-CollectiveX 负责调度基准测试、在真实资源分配上执行测试，并上传每次运行生成的中立产物。
-它不验证、晋级、排名、推荐或筛选这些产物，也不决定消费者应展示什么内容。所有下游展示与
-比较都由消费者负责。完整测量方法见
-[docs/methodology_zh.md](docs/methodology_zh.md)。
+CollectiveX 负责调度基准测试、在真实分配的资源上执行测试，并上传每次运行生成的中立
+产物。它不会验证这些产物，也不会对其进行推广、排名、推荐、选择，或
+决定消费者显示什么。任何下游显示或比较均由消费者
+负责。完整的测量方法见 [docs/methodology.md](docs/methodology_zh.md)。
 
 ## 执行配置
 
-工作负载采用 packed placement，并为每个 backend/topology 使用一个固定的
-`fixed-profile` 资源配置，不进行调优扫描。Combine 始终使用 BF16；dispatch precision
-是扫描维度：包含一个 BF16 对照组，并在上游支持 FP8 dispatch 的 backend（DeepEP V2、
-MoRI、UCCL-EP）上加入 FP8 dispatch。`normal` 模式由调用方预量化；`low-latency`
-模式下，DeepEP 和 UCCL-EP kernel 从 BF16 内部量化，而 MoRI 仍由调用方预量化。
-本版本 NCCL EP 仅支持 BF16，因此只生成对照组。覆盖范围仅包含 uniform routing。
-用例运行在以下两种模式之一：
+工作负载采用紧凑放置，并为每种 backend/拓扑使用一个固定的 `fixed-profile` 资源配置。
+不进行调优扫描。Combine 始终使用 BF16。Dispatch 精度是一个扫描
+维度，包括一个 BF16 对照组，以及在所有上游支持 FP8 dispatch 的 backend
+（DeepEP V2、MoRI、UCCL-EP、FlashInfer EP）上增加一个 FP8 dispatch；在 `normal` 模式下由调用方预量化（在
+`low-latency` 模式下，DeepEP 和 UCCL-EP 内核会在内部从 BF16 量化。MoRI 仍由
+调用方预量化，而 FlashInfer 没有 `low-latency` 路径）。调用方的量化开销计入
+测得的 dispatch，因为生产环境中的前向传播会在关键路径上承担这项开销。本次发布中的 NCCL EP
+仅支持 BF16，因此它只生成对照组。覆盖范围仅限均匀路由。用例在以下两种模式之一运行：
 
-- `normal` 使用 `layout-and-dispatch-v1`、按 rank 去重的 token payload，以及仅包含
-  activation、无权重的 rank-sum combine，并运行完整的 decode 和 prefill ladder。
-- `low-latency` 使用各 backend 的 decode 优化 kernel：DeepEP 使用旧版
-  `deep_ep.Buffer` IBGDA `low_latency_dispatch`/`low_latency_combine`；UCCL-EP
-  通过其 CPU proxy transport 复用相同的旧版低延迟 kernel；MoRI 使用 `IntraNodeLL`
-  kernel。该模式仅覆盖 decode/EP8，并按 SKU capability 启用，因此可运行集合与
-  `normal` 不同，由每个 SKU 的 `ll_backends` registry 条目控制。当前包括 H100/H200/B200
-  上的 DeepEP V2 EP8、MI300X/MI325X/MI355X 上的 MoRI EP8，以及 H100/H200/B200
-  上的 UCCL-EP EP8。AMD SKU 保留 UCCL-EP normal 模式，但不启用其会触发
-  warp-group assertion 的低延迟 kernel；NCCL EP 暂无低延迟条目，相关 decode kernel
-  仍受 [NVIDIA/nccl#2303](https://github.com/NVIDIA/nccl/issues/2303) 影响。
-  单节点 EP8 走节点内 NVLink/XGMI 低延迟路径，不需要 `/dev/gdrdrv`；只有多节点
-  scale-out EP16 才涉及 NVSHMEM/IBGDA。
+- `normal` 使用 `layout-and-dispatch-v1`、按 rank 去重的 token 载荷，以及仅针对激活值、
+  无权重的 rank-sum combine。它运行完整的 decode 和 prefill 阶梯。
+- `low-latency` 使用各 backend 针对 decode 优化的内核系列：在 DeepEP 上使用旧版
+  `deep_ep.Buffer` IBGDA `low_latency_dispatch`/`low_latency_combine`（按专家填充的接收
+  和源端门控加权 combine）。在 UCCL-EP 上使用相同的旧版 `Buffer` 低延迟内核，
+  在所限定的 EP8 运行中通过 NVLink 使用 `cudaIpc`，而不是其 CPU 代理传输。在 MoRI 上使用 `IntraNodeLL` 内核（单次调用、
+  纯节点内、采用与 `IntraNode` 相同的紧凑布局和无权重 rank-sum combine）。它是一个
+  仅限 decode 阶段、受各 SKU 能力约束的附加项，其可运行集合与 `normal` 不同，因此
+  由各 SKU 的 `ll_backends` 注册表条目启用（目前包括 DeepEP V2：在
+  H100/H200 上为 EP8，在 B200 上为 EP8 *和 EP16*（nscale 裸金属池，其由 gdrdrv 支持、通过原生 IB 运行的 IBGDA
+  正是低延迟 scale-out 所需的条件，而虚拟化池均不具备），以及
+  GB200/GB300，其 EP16 仍位于 MNNVL scale-up 域内；
+  此外还包括 MI300X/MI325X/MI355X 上的 MoRI EP8，以及仅限 H100/H200/B200 的 UCCL-EP EP8（UCCL 的低延迟主机端
+  断言 `kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group` 在 AMD 上无法成立，因为
+  `kNumMaxWarpGroups` 为 16；上游已将 `kNumMaxTopK` 从 9 提高到 16（uccl#1016，2026-07-13），而
+  我们固定的版本晚了六天。对于任何 CU 数量，该乘积均为 16，因此这是一个有明确时间点的回归，
+  而不是硬件限制；AMD SKU 保留 UCCL-EP normal 模式，但不启用 LL）；
+  还包括全部六种 NVIDIA SKU 上的 NCCL EP EP8；在单句柄修复消除了曾导致其卡死的
+  [NVIDIA/nccl#2303](https://github.com/NVIDIA/nccl/issues/2303) 信号别名问题后，这些支持已恢复。
+  B300 将 `candidate` NCCL EP 作为其*唯一*的低延迟行，因此它没有生产级
+  decode 覆盖。DeepEP V2 在 B300 上完全不生成 LL 行（原因是下方 backend 表中的 IBGDA 地址句柄壁垒），
+  而 `_ll_runnable` 仅添加可运行的单元格，因此该壁垒在这里以文字说明，
+  而不是分类矩阵行的形式出现）。
+  限定范围的单节点 EP8 运行走节点内 NVLink/XGMI
+  低延迟路径（不需要 `/dev/gdrdrv`，已在缺少该设备的 H200 上验证）。只有多节点 scale-out（EP16）运行才会
+  在线路上使用 NVSHMEM/IBGDA 传输载荷。旧版 Buffer 在 EP8 下仍会
+  自动启用 IBGDA，这正是 B300 在此失败的原因。
 
-固定 timing profile 位于 `configs/sweep.json`：每个 point 执行 256 个 trial，每个
-trial 含 8 次计时迭代，共 2048 个 sample；在每个 trial/point 测量每个 component
-前，执行 32 次同步的完整 dispatch-stage-combine warmup。每个 trial 会轮换 component
-测量顺序，使每个计时 component 均匀出现在各位置；每次迭代先取跨 rank 最大延迟，再计算
-nearest-rank p50/p90/p95/p99。Roundtrip p99 是主要延迟指标。基于带 key 的 BLAKE2b
-counter 在所有 runtime 上生成逐字节一致的 routing 和 gate weight。
+用例采用 `configs/sweep.json` 中固定的计时配置：256 次 trial x 8 次计时迭代（每个组件 2048 个
+样本），并且在每个 trial/点对每个被测组件进行测量前，先完成 32 次同步的完整 roundtrip 预热。
+每个 trial 都会轮换组件的测量顺序，使每个计时组件都能占据序列中的每个位置；
+每次迭代先取跨 rank 最大值，再计算 nearest-rank p50/p90/p95/p99。一个带键的 BLAKE2b 计数器会在
+每个 runtime 上生成逐字节完全相同的路由和门控权重。
 
-正确性由独立于实现的 oracle 检查。Oracle 重现 backend 的两级 reduction：先在
-scale-up domain 内以 FP32 归约，再将每个 domain 的 partial 转为 BF16 后用于
-scale-out。Combine gate 要求最大逐元素相对误差小于 `8 * 2^-8`，分母下限为 0.02，
-该规则同时适用于 scale-up 和多节点 scale-out topology。在 FP8 dispatch 下，oracle
-对语义 payload 应用相同的 per-token cast round-trip，因此 dispatched-payload 比较仍
-保持 bit-exact，combine gate 不变。任一 rank 或 point 失败都会使该用例在其结果中
-标记为不合格。
+这些组件全部测量**全新进入**（每个计时窗口前后都会排空 GPU），即
+空闲流水线的延迟，而不是 decode 循环实际承担的延迟。因此，每一行还会包含**链式
+配对周期**：4 次 trial x（连续发出 128 个 dispatch→combine 对，中间不做主机同步，丢弃前
+16 个作为流水线填充）= 448 个观测值，并通过中位数进行跨 rank 归约。每个 trial 运行
+**两条同级链**（先运行仅携带逐操作事件的 floors 链，再运行仅携带外层配对事件的 period 链），
+因为第一版在每对中使用六个事件的单链方案；当设备运行速度超过主机时，其中四次内部 `record()` 调用
+会被计入 period，从而把一个约为 10–30µs、几乎恒定的主机开销发布成传输开销（T=1 时增加 +20–38%，
+且影响整个设备群）。对于每个包含该字段的行，`components.pair_period` 都是
+核心延迟指标（在 b200/h200/gb200 手工参考结果通过两遍设备群产物确认后，于 2026-08-06 发布），
+而 `summarize.py` 会说明带星号的列在两种情况下分别包含什么。floors 链发布 `chain_floor_us`，即
+每个操作窗口的跨 rank 最小值；period 链还会产生 `chain_health.pair_spread_us`
+（跨 rank 节拍证明）、`interpair_gap_us`（已发布窗口之外的每对开销；它既是防止检测开销重新混入的
+回归保护，也是一项判别指标，可避免把由同步主导的 `period − Σfloors` 差值误读为该缺陷再次出现。有关
+该残差每种符号的含义，请参阅方法文档中的 `chain_floor_us` 项）以及
+`settle_drift_us`（后半段 period 减去
+前半段 period，是 `chain_drop` 仅作假设时所缺少的收敛证明）。链式逐操作
+*中位数*从不发布：rank 间等待会落在某个 rank 阻塞所在的操作窗口中，对每个 rank 而言稳定，
+但在不同 rank 之间具有任意性，并且只有在配对总计中才守恒。现有内容均未被重命名或重新定义，
+扫描的 `version` 仍为 1，因此消费者应以
+`components.pair_period` 是否存在作为判断依据。
 
-Matrix 覆盖 H100、H200、B200、B300、GB200、GB300、MI300X、MI325X 和 MI355X。
-`sweep_matrix.py` 生成请求的 SKU、backend、EP size 和 token ladder，然后提取严格的
-per-shard control，并拒绝缺失、过期、格式错误或被修改的 shard control。
-`--only-sku`、`--exclude-skus`、`--ep-sizes` 和 `--precisions` 可选择子集。
-Matrix 在每次 dispatch 时生成，不存在冻结 digest 或锁定的 case count。
+链式机制会经过两重检查：每个链式 trial 自身最终的 combine 输出，都会通过完全相同的代码路径
+与一个已排空的配对进行比较（`correctness.chain_last_output_passed`，
+任何差异的大小记录在 `correctness.chain_last_output_error` 中）；同时，完整 oracle 会在每个阶梯点
+针对链结束后留下的状态运行一次
+（`correctness.post_chain_state_passed`）。第二项始终作为门禁。第一项仅在
+链按配对执行 staging 时作为门禁；若 staging 被提升到链外，则该项为 `null`。在这种提升下，
+两种机制都不会 combine 与其自身 dispatch 相匹配的输入，因此二者不可比较。该边界是实测得出的，
+而非假设：相同的 h100 用例在采用提升时，差异为 combine 容差的 1000×–2966×，不采用提升时则
+差异恰好为零。参见方法文档的 Correctness 章节。这里的 null 是一个有意保留且边界明确的缺口。仅发生于 FP8、
+仅发生于自由运行且无状态的损坏不会触发任何红色门禁，而 `CX_FP8_CONSUME=dequant` 逃生口
+是对此进行探测的常驻手段。
+
+每一行中的 `roundtrip` 都表示先 dispatch 再 combine（即传输）。专家输出 staging 位于
+其外部，并作为 `stage` 单独报告。在 FP8 下，该组件是测试框架脚手架，
+代替专家 GEMM；而生产环境中的专家 GEMM 会原生使用 FP8 操作数，而不会
+物化 BF16 副本，因此不得将 `stage` 累加到总计中，也不得在 backend 之间比较。
+在此变更之前测量的行，会将 MoRI BF16 和
+FlashInfer BF16 的 staging 拷贝包含在链内；扫描的 `version` 在此变更前后仍保持为 1，因此
+只有 `implementation.stage_excluded_from_roundtrip` 以及是否存在 `stage` 组件
+能够区分这两代结果。完整契约见 [docs/methodology.md](docs/methodology_zh.md)。
+
+正确性通过一个与具体实现无关的 oracle 检查，该 oracle 会复现 backend 的
+两级归约：先在 scale-up 域内使用 FP32，再将每个域的部分结果转换为 BF16，
+用于 scale-out 发送。Combine 门禁要求最大逐元素相对误差严格低于 `8 * 2^-8`
+（分母下限为 0.02）；这一标准同时适用于 scale-up 和多节点 scale-out 拓扑。
+在 FP8 dispatch 下，oracle 会对其语义载荷应用相同的逐 token 转换 round-trip，
+因此 dispatch 载荷比较仍然逐位精确，combine 门禁也保持不变。量化是被建模的，
+而不是通过容差放行的。任何 rank 或点失败，都会使该用例失去写入结果的资格。
+
+矩阵覆盖 H100、H200、B200、B300、GB200、GB300、MI300X、MI325X、MI355X 和 TPU v7。
+`sweep_matrix.py` 会实例化
+所请求的 SKU、backend、EP 大小和 token 阶梯，然后提取严格的逐 shard 控制项，
+并拒绝缺失、过期、格式错误或被修改的 shard 控制项。`--only-sku`、`--exclude-skus`、
+`--ep-sizes` 和 `--precisions` 用于选择子集。矩阵会按每次 dispatch 动态生成，
+不存在冻结的摘要或锁定的用例数。
 
 | 系统 | EP8 | EP16 |
 |---|---|---|
 | H100/H200/B200/B300 | 1x8 NVLink，scale-up | 2x8 NVLink + RDMA，scale-out |
 | MI300X/MI325X/MI355X | 1x8 XGMI，scale-up | 2x8 XGMI + RDMA，scale-out |
 | GB200/GB300 | 2x4 MNNVL，scale-up | 4x4 MNNVL，scale-up |
-| TPU v7 (tpu7x) | 1x8 ICI，scale-up | unsupported coverage row —— 没有多主机 slice |
+| TPU v7 (tpu7x) | 1x8 ICI，scale-up | 2x8 ICI，**scale-up** |
 
-物理 host 数量不决定 scope：两个 GB topology 都位于同一个 72-GPU MNNVL scale-up
-domain 内。
+物理主机数量并不决定范围：两种 GB 拓扑都位于同一个 72-GPU MNNVL
+scale-up 域内。
 
-TPU v7 的 EP16 被记录为 unsupported 而非实际执行，原因在于该池的**部署方式**，而不是硬件
-限制。`tpu7x` 的 ICI 是跨主机的 3D torus——[官方文档](https://docs.cloud.google.com/tpu/docs/tpu7x)
-列出的 topology 从 `2x2x1`（4 chip、1 主机）到 `2x2x2`（8 chip、2 主机）一直到 `8x16x16`，
-全部属于同一个 ICI fabric——因此多主机的 TPU EP cell 属于**基于 ICI 的 scale-up**，而不是
-scale-out。此处真正的阻碍是 `tpu-v7x` 被部署为六个*相互独立*的 `2x2x1` slice，因此这些主机
-之间没有共享 fabric。解决办法是使用更大的 slice（JobSet 加 `jax.distributed.initialize`，
-并相应提高 `scale_up_domain`），而不是换一种跨主机传输；`tpu-gke` launcher 在 `nodes > 1`
-时直接拒绝，而不是悄悄测量别的东西。该 SKU 上的 `scale_out_transport: dcn` 描述的是真正的
-scale-out 情形，即通过每 chip 100 Gbps 的数据中心网络进行*跨 slice* 通信，目前没有任何
-cell 使用它。
+**TPU v7 EP16 是 scale-up，这并非为了方便标注。** `tpu7x` 的 ICI 是一个跨主机的 3D 环面网络，
+[文档所列](https://docs.cloud.google.com/tpu/docs/tpu7x)拓扑从
+`2x2x1`（4 个芯片，1 台主机）→ `2x2x2`（8 个芯片，2 台主机）→ 一直到 `8x16x16`，全部属于同一个 ICI 互连，因此
+一个 16 设备单元会跨越主机边界，但不会离开 scale-up 域。不会有任何流量经过 DCN。
+因此，该 SKU 的 `scale_up_domain` 字面值为 `"ep"`，意味着它随 EP 度数变化：
+切片会按照用例所需的大小进行配置，因此 EP8 报告的域大小为 8，EP16 报告的域大小
+为 16，并且二者都保持 `scope: scale-up`。固定为 8 会把 EP16 错误标注为通过 DCN 的 scale-out；
+固定为 16 则会夸大 EP8 shard，因为它的切片实际上只有 8 个设备宽。
 
-| Backend | 当前范围 |
-|---|---|
-| DeepEP V2 | `normal` 模式使用 PR #605 的 `ElasticBuffer`，并包含上游 #630 和 #640 的精确修复：scale-up 使用 LSA，x86 EP16 scale-out 使用 GIN。FP8 dispatch 通过 `use_fp8_dispatch`（blockwise e4m3fn）与 BF16 并列。`low-latency` 模式使用旧版 `deep_ep.Buffer` IBGDA decode kernel（per-expert padded layout、weighted combine、`use_fp8` e4m3fn），仅覆盖 decode/EP8 |
-| MoRI | `normal` 模式在所有 CDNA SKU 上以直接 `IntraNode` kernel 执行 scale-up EP8，并为 2x8 XGMI + RDMA 的 EP16 固定使用 `InterNodeV1`。`low-latency` 模式选择 `IntraNodeLL` decode kernel，仅覆盖 decode/EP8。FP8 dispatch 由调用方预量化：gfx942 使用 per-SKU e4m3fnuz，gfx950 使用 e4m3fn；combine 保持 BF16（`quant_type=none`） |
-| UCCL-EP | [UCCL](https://github.com/uccl-project/uccl) EP 是 API 完全一致的 DeepEP 替代实现；其 CPU proxy 通过普通 `libibverbs` 发起 GPUDirect RDMA，不使用 NVSHMEM/IBGDA，并通过软件处理消息顺序、atomic 和 flow control。Scale-up 是单节点 `cudaIpc` over NVLink/XGMI，不使用 MNNVL。`normal` 模式使用旧版 `Buffer` `dispatch`/`combine`；`low-latency` 复用旧版低延迟 kernel，仅覆盖 decode/EP8。`normal` 模式的 FP8 dispatch 由调用方预量化；低延迟模式由 decode kernel 内部量化为 e4m3；combine 为 BF16。它在 NVIDIA 和 AMD 的 EP8 scale-up 上运行。EP16 虽可建立连接并通过轻量正确性用例，但重 token 数下超出统一的 per-case wall-clock budget，因此当前记为 unsupported coverage row |
-| NCCL EP | [NCCL EP](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_ep) 是 NVIDIA 基于 NCCL Device API 的原生 MoE dispatch/combine：节点内使用 LSA，节点间使用 GIN，并通过 `nccl4py` binding 驱动。`normal` 模式选择 `HIGH_THROUGHPUT` algorithm；低延迟 adapter 已实现但当前没有启用条目。此版本仅支持 BF16，且仅适用于 NVIDIA 和 CUDA 13。它在 H100/H200/B200/B300 上运行 EP8，在 GB200/GB300 上运行 EP8 和 EP16；GB EP16 仍处于 MNNVL scale-up domain 内。x86 EP16 scale-out 在 `nccl_ep.cc` 内发生 fault，因此记为 unsupported coverage row |
-| JAX ragged A2A（TPU probe） | 在覆盖单主机 ICI domain 的一维 device mesh 上执行 `jax.lax.ragged_all_to_all`，这正是 JAX 系 MoE 栈用于 EP dispatch/combine 的 primitive。仅支持 `normal` 模式与 BF16：probe 测量的是互连 collective 本身，因此没有可标注的量化 dispatch 路径。Dispatch 为 permute gather 加 ragged exchange；combine 为反向 exchange 加 fp32 scatter-add（unweighted rank-sum）。对于缺少 ragged primitive 的 JAX build，`--transport-impl padded` 会切换到固定容量的 `jax.lax.all_to_all`——它对生产路径的建模严格更差，绝不会被静默替换，并且会在 artifact 中标明。这一测量的含义与边界见 TPU Probe 一节 |
+这对比较的影响是：**TPU EP16 可与 GB200/GB300 EP16 比较**，后者同样是 scale-up，
+位于 72-GPU MNNVL 域内，但**不可**与 b200/h100/mi355x EP16 比较，因为后者确实会经过一次 RDMA
+跳转。EP 度数相同，但机制不同；应使用产物中的 `scope` 进行区分。
+SKU 上的 `scale_out_transport: dcn` 描述的是真正的 scale-out 情况，即通过每芯片 100 Gbps 的数据中心网络
+进行跨*切片*流量传输；当前没有任何单元使用这种方式。
 
-DeepEP V2 指 [DeepEP PR #605](https://github.com/deepseek-ai/DeepEP/pull/605)
-引入的 `ElasticBuffer`，而不是更新版本的旧版 `Buffer` build。固定源代码来自
-[PR #630](https://github.com/deepseek-ai/DeepEP/pull/630) 的 head，其 parent 是
-#605 merge tree，并应用上游 [PR #640](https://github.com/deepseek-ai/DeepEP/pull/640)
-精确的一行 library matcher。前者修复 GIN 不可用时纯 scale-up 初始化；后者避免将 NCCL
-shared-memory mapping 误判为重复 NCCL library。Scale-up 用例请求 NCCL Device API
-LSA，并在 realized LSA team 未覆盖完整 EP world 时 fail closed。x86 EP16 scale-out
-要求 GIN hybrid path、两个逻辑 scale-out domain、两个物理 RDMA rank，以及每个 domain
-八个 scale-up rank；GB EP16 保持 MNNVL scale-up，因此使用 LSA。是否尝试某个
-SKU/backend/EP cell 是 capability 事实；是否成功由基准测试返回码决定。
+运行它需要一个多主机切片，而看似显然的命令并不会创建这种切片：单独使用 `--tpu-topology`
+只会创建一个*放置*策略，而 `tpu7x` 会拒绝该策略（"Use workload policy instead"）。EP16 背后的池
+是通过显式工作负载策略创建的，
+`resource-policies create workload-policy --type=HIGH_THROUGHPUT --accelerator-topology=2x2x2`。
+相应操作步骤记录在 `launchers/launch_tpu-gke.sh` 中，就在依赖该策略的保护逻辑旁边。
+随后，shard 以带无头 Service 的 Indexed Job 形式运行，以便 GKE 注入 `TPU_WORKER_ID` 和
+`TPU_WORKER_HOSTNAMES`，供 `jax.distributed.initialize()` 使用。两种精度共享同一个多主机
+shard：切片是单个不可分割的分配单元，因此如果两个 shard 各自请求其全部节点，它们将各自只得到一个
+pod，随后两个仅形成一半的切片都会中止。
 
-## Workflow 与产物
+探针会强制执行两项多主机不变量，因为违反任意一项都不会报错，而是会产生一个看似合理的
+数值。每个进程都必须执行*完全相同的 slice-wide collective 序列*，
+因此在多主机环境下，`reference_timing` 以 `lockstep` 模式运行（固定迭代次数）。基于时长驱动的
+循环会使计数依赖各主机的时钟，并导致 libtpu 中止整个切片。并且 mesh 必须由
+`jax.devices()` 构建，绝不能使用 `jax.local_devices()`：后者会在每台主机上构建一个 EP8 mesh，
+并在 EP16 标签下测量两个彼此独立的 8 路交换。交换确实跨越 16 个 rank 这一点，是通过物理规律检查的，
+而不是直接断言的。dispatch 成本会随路由扇出变化
+（在 T=8192 时测得从 EP8 到 EP16 为 1.232x，与 1.232 的扇出比一致），而两个独立的
+8 路交换应保持在 1.0。
 
-`.github/workflows/collectivex-sweep.yml` 包含两个 job。`setup` 生成 public-SKU matrix
-（输入为 `backend`、`only_sku`、`exclude_skus`、`ep_sizes`）并上传 matrix。
-`sweep` 为每个 matrix entry 提取严格且被忽略的 `.shards/<id>.json` control，每个
-shard 执行一次 allocation，在需要时于 allocation 前获取固定版本的 DeepEP source，
-并使用 `always()` 上传结果，使红色或部分完成的运行仍能保留产物。
+| 后端 | 引擎可用性 | 当前范围 |
+|---|---|---|
+| DeepEP V2 | `production`，vLLM 使用 `--all2all-backend deepep_v2`，SGLang 使用 `--moe-a2a-backend deepep` | `normal` 模式采用 PR #605 的 `ElasticBuffer`，并包含上游 #630 和 #640 的精确修复：scale-up 使用 LSA，x86 EP16 scale-out 使用 GIN。除 BF16 外，还通过 `use_fp8_dispatch` 进行 FP8 dispatch（分块 e4m3fn）。`low-latency` 模式采用旧版 `deep_ep.Buffer` IBGDA decode kernel（按 expert 填充的布局、加权 combine、`use_fp8` e4m3fn），仅用于 decode；凡启用处均支持 EP8，此外还支持 GB200/GB300 上的 EP16（位于 MNNVL 域内），以及 B200 的 nscale 裸金属池上的 EP16（通过原生 IB rail 使用 IBGDA，并带有 `/dev/gdrdrv`，但此前的虚拟化 b200 池始终无法运行它）。B300 在 `low-latency` 中是不受支持的覆盖行：即使是单节点 EP8 运行，旧版 Buffer 也会自行启用 NVSHMEM IBGDA，而在 B300 上创建地址句柄会失败（`ibgda.cpp:2234 Unable to create ah`），所有八个 rank 均返回 rc255。`NVSHMEM_DISABLE_IB=1` 无法解决问题。无论如何，Buffer 都会重新启用 IBGDA，并且无论设置还是不设置该变量，运行都会以相同方式失败（在 b300-002 和 b300-011 上测得） |
+| MoRI | `production`，vLLM 使用 `--all2all-backend mori_*`，SGLang 使用 `--moe-a2a-backend mori` | `normal` 模式在每个 CDNA SKU 上都使用直接的 `IntraNode` kernel 实现 scale-up EP8。EP16 在三者上都是不受支持的覆盖行：adapter 将 `InterNodeV1` 固定用于 2x8 XGMI + RDMA，但其 combine 会在传输层损坏数据（ROCm/mori#475），因此 registry 发布的是 `mori: [8]`，不会 dispatch 任何 EP16 case。`low-latency` 模式选择 `IntraNodeLL` decode kernel（单次调用、纯节点内、与 `IntraNode` 相同的紧凑布局和非加权 combine），仅支持 decode/EP8。FP8 dispatch 由调用方预量化（gfx942 上使用各 SKU 对应的 e4m3fnuz，gfx950 上使用 e4m3fn）。除 BF16 dispatch 外，combine 保持 BF16（`quant_type=none`） |
+| UCCL-EP | `candidate`（没有引擎公开 UCCL-EP selector） | [UCCL](https://github.com/uccl-project/uccl) EP：可直接替换 DeepEP 且 API 完全相同，其 CPU proxy 通过普通 `libibverbs` 发起 GPUDirect RDMA（不使用 NVSHMEM/IBGDA），并通过软件实现消息排序、原子操作和流量控制。Scale-up 是通过 NVLink/XGMI 使用单节点 `cudaIpc`（绝不使用 MNNVL）。`normal` 模式采用旧版 `Buffer` 的 `dispatch`/`combine`（非加权 rank-sum）。`low-latency` 复用旧版 `low_latency_dispatch`/`low_latency_combine` decode kernel（加权 combine），仅支持 decode/EP8。`normal` 模式下的 FP8 dispatch 由调用方预量化（分块 e4m3fn，gfx942 上使用各 SKU 对应的 e4m3fnuz）。在 `low-latency` 模式下，调用方发送 BF16，decode kernel 在内部将其量化为 e4m3（`use_fp8`）。Combine 为 BF16。可在 NVIDIA 和 AMD 上运行（H100/H200/B200 + MI300X/MI325X/MI355X），支持 EP8 scale-up。跨节点 EP16 在功能上可用（节点间 RDMA 路径能够连接，轻量 case 通过正确性验证），但在 token 数量较大时，其 CPU proxy 吞吐量会超出标准化的逐 case 墙钟时间预算，因此 EP16 目前是不受支持的覆盖行 |
+| NCCL EP | `candidate`（NVIDIA 自有库，但没有引擎公开 NCCL-EP selector） | [NCCL EP](https://github.com/NVIDIA/nccl/tree/master/contrib/nccl_ep)：NVIDIA 基于 NCCL Device API 的原生 MoE dispatch/combine，节点内使用 LSA（NVLink load/store），节点间使用 GIN（GPU-Initiated Networking），并通过 `nccl4py` binding 驱动。`normal` 模式选择 `HIGH_THROUGHPUT` 算法（FLAT `[N, hidden]` 接收，非加权 rank-sum combine）。在单句柄修复消除 NVIDIA/nccl#2303 的 signal aliasing 后，`LOW_LATENCY` 算法恢复了全部六种 NVIDIA SKU 上的 EP8 `ll_backends` 行。该 LL decode 阶梯被限制为 T<=128，低于其 256-slot 接收容量：`nccl_ep` 的 combine recv pipeline 移植自 DeepEP #642 之前的 kernel，并且同样缺少 `mbarrier_arrive` 之前的 shared-memory fence，导致 GB300 上的 T=256 在 5 次执行中有 1 次发生损坏。其结果呈双峰分布，正常行的相对误差为 0.0039，而失败时为 0.4704。NVIDIA/nccl master 中不存在该 fence，因此上游尚未修复。该限制降低了暴露概率，但**并非**安全边界：每个 combine recv 都缺少该 fence，而 T=256 只是 pipeline 迭代次数最多的一级，因此较低各级只是更不容易触发竞态，并非不受影响。待包含修复的 wheel 发布后恢复，仅支持 BF16：`contrib/nccl_ep/RELEASE.md` 写道“不支持 FP8”，因此不会生成 FP8 case。该说明值得重新测试，而不应直接信任，因为我们固定 commit 中的 C 库确实会读取 `inputs->scales` 并根据 e4m3/e5m2 进行切换，文档列出的两个 FP8 排除项都是我们未使用的 expert-major 布局，而且自 2026-06-11 起 `NVIDIA/nccl` 一直未变，而 `NVIDIA/nccl-extensions` 已彻底替换该行。仅支持 NVIDIA 和 CUDA 13。H100/H200/B200/B300 上支持 EP8 scale-up，GB200/GB300 上支持 EP8 和 EP16，其中 EP16 保持在 MNNVL scale-up 域内。x86 EP16 scale-out 是不受支持的覆盖行：跨节点 GIN 路径在四种 SKU 上，无论使用 RoCE 还是 IB，都会在 `nccl_ep.cc` 内以相同方式发生 fault，这是 GDAKI 限制，而非 fabric 选择问题 |
+| FlashInfer EP | `production`，vLLM 使用 `--all2all-backend flashinfer_nvlink_one_sided` | [FlashInfer](https://github.com/flashinfer-ai/flashinfer) `MoeAlltoAll`：TensorRT-LLM 的单边 MNNVL all-to-all，其中每个 rank 将 token 直接写入其 peer 的 workspace window，combine 再将其读回，不存在 send/recv 配对，也不使用 NVSHMEM。仅支持 `normal` 模式（只有一个 kernel family，没有独立的 decode 路径），且仅支持 GB200/GB300，因为其传输采用 MNNVL。FP8 dispatch 由调用方预量化为分块 e4m3fn，作为第四个 dispatch payload 与其每个 128 元素块对应的 FP32 scale 一并传输，同时 combine 平面被强制设为 BF16。C++ `toNvDataType` 对 combine 仅接受 fp16/bf16/fp32，因此 FP8 combine buffer 会抛出异常，而不是导致数据损坏。支持 EP8 和 EP16，二者均位于 scale-up 域内。与此处其他所有后端不同，其 combine 使用 PAYLOAD dtype 而非 FP32 进行累加：0.6.16 之前的 wheel 使用成对 BF16 树归约 top-k contribution，并在每一层进行舍入，因此 oracle 直接对该归约建模（`combine_reduction = "topk-slot-tree"`），而不是放宽容差。0.6.16 将 accumulator 改为 FP32，adapter 会根据已安装版本切换模型 |
 
-每个 shard 生成 per-case result JSON 和一个小型机械 summary。用例是否成功完全取决于
-自身返回码；不存在 completeness 或 privacy validation 步骤，失败或 unsupported cell
-不会生成 synthetic record。任何步骤都不会将 run 晋级、构建 dataset 或推进 channel；
-中立产物就是最终输出，消费者自行决定展示方式。
+| JAX ragged A2A（TPU probe） | `candidate`（没有推理引擎公开 JAX ragged A2A selector） | 在 slice 的 ICI 域上，基于一维 device mesh 使用 `jax.lax.ragged_all_to_all`（JAX MoE stack 用于 EP dispatch/combine 的 primitive），支持 EP8（一个 host）和 EP16（两个 host，但仍位于同一个 ICI 域）。支持 `normal` 模式、BF16 和 FP8。FP8 dispatch 使用分块 e4m3fn，每个 128 元素块对应一个 FP32 scale（DeepEP 的 `per_token_cast_to_fp8`），并将 value 和 scale 作为两次 ragged exchange 发送。`fp8_consume: native` 表示 expert 直接消费 fp8，collective 之间不存在独立转换。转换会作为 `stage` 单独测量。两种精度下的 combine 均为 BF16，因为 expert 输出 BF16。Dispatch 是 permute gather 加 ragged exchange。Combine 是反向 exchange 加 fp32 scatter-add（非加权 rank-sum）。缺少 `ragged_all_to_all` 的 JAX build 会**失败关闭**。不存在填充式固定容量 `all_to_all` fallback，因为 padding 会传输不同数量的字节，并悄然测量成其他内容。关于该测量是什么以及不是什么，请参阅 TPU Probe 一节 |
 
-Workflow 不接收或上传 operator credential；runner-local override 和 selector 均留在
-runner 上。每个步骤的 runner log 保留于 runner 以便 postmortem，结果产物只包含
-methodology 中列出的字段。
+DeepEP V2 指的是由
+[DeepEP PR #605](https://github.com/deepseek-ai/DeepEP/pull/605) 引入的 `ElasticBuffer` 实现，而不是更新的旧版 `Buffer` build。
+固定的源代码是上游 `main`，其中包含 #605，以及
+[PR #630](https://github.com/deepseek-ai/DeepEP/pull/630)（修复 GIN
+不可用时的纯 scale-up 初始化）、[PR #640](https://github.com/deepseek-ai/DeepEP/pull/640)（防止 NCCL
+shared-memory mapping 被错误分类为重复 NCCL 库），以及
+[PR #642](https://github.com/deepseek-ai/DeepEP/pull/642)（low-latency combine fence，用于修复
+[issue #700](https://github.com/deepseek-ai/DeepEP/issues/700) 中 Blackwell 最高一级的数据损坏）；此前固定的版本，即合并前 #605 分支上的 #630
+head，早于这些内容。Scale-up case 请求 NCCL Device API LSA，除非实际建立的 LSA team 覆盖完整 EP world，否则会失败关闭。x86 EP16 scale-out case 则要求使用
+GIN 的混合路径，其中两个逻辑 scale-out 域由两个物理 RDMA rank 表示，每个域包含八个
+scale-up rank。GB EP16 仍然是 MNNVL scale-up，因此使用 LSA。是否尝试给定的
+SKU/backend/EP cell 属于能力事实。是否成功则由
+benchmark 的返回码决定。
+
+## 工作流与产物
+
+`.github/workflows/collectivex-sweep.yml` 包含两个作业。`setup` 生成一个公共 SKU 矩阵
+（输入为 `backend`、`only_sku`、`exclude_skus`、`ep_sizes`）并上传该矩阵。
+`sweep` 为每个矩阵条目提取一个严格且被忽略的 `.shards/<id>.json` 控制文件，为每个分片执行一次
+资源分配，在需要时于资源分配前获取固定版本的 DeepEP 源码，并使用 `always()` 上传
+结果产物，因此即使运行失败或仅部分完成，仍会执行上传。
+
+每个分片都会生成逐用例结果 JSON 和一份简短的机械式摘要。用例是否成功以
+基准测试自身的返回码为准。不存在完整性或隐私验证步骤，失败或
+不受支持的单元格不会生成合成记录。没有任何步骤会提升某次运行、
+构建数据集或推进频道。中立产物即为输出。消费者下载
+这些产物，并自行决定显示哪些内容。
+
+不会向工作流传递或上传任何运维人员凭据。runner 本地覆盖项及任何
+选择器均保留在 runner 上。每个步骤的 runner 日志保留在 runner 上以供事后分析，而
+结果产物仅包含方法论中列出的字段。
 
 ## Runner 配置
 
-每个 SKU 的 Slurm 和 storage 值来自 registry 中的 tracked baseline。可选的 runner-local
-JSON 文档位于 `$XDG_CONFIG_HOME/inferencex/collectivex.json`，或由
-`COLLECTIVEX_OPERATOR_CONFIG` 指定；它可以逐字段覆盖 baseline。未知 runner、未知字段、
-重复 key 和非 JSON 输入都会 fail closed，配置不会作为 shell 执行。GHA 不传 operator
-secret，因此没有本地文档时，SKU 完全使用 tracked baseline。
+每个 SKU 的 Slurm 和存储值均来自注册表中受跟踪的基线。可选的
+runner 本地 JSON 文档可位于 `$XDG_CONFIG_HOME/inferencex/collectivex.json`，或由
+`COLLECTIVEX_OPERATOR_CONFIG` 指定，并按字段覆盖该基线。没有注册表条目的 runner、
+未知字段以及非 JSON 输入都会以关闭方式失败，并且配置绝不会作为 shell 求值。
+不会拒绝重复的 JSON 键。`json.load` 会静默保留最后一个值，而且除当前正在解析的键之外，
+其他 runner 键不会被验证，因此 SKU 名称中的拼写错误会被忽略，而不会
+被报告。GHA 不会传递任何运维人员密钥，因此除非存在 runner 本地文档，否则 SKU
+将完全使用其受跟踪的基线运行。
 
-所有 per-SKU platform 数据都位于 `configs/platform_config.json` registry，包括
-architecture/product、vendor、accelerator runtime、container image 与 platform、
-固定 placement、launcher、可运行的 backend/EP pair、scale-out `fabric` identity
-（NIC 与 switch）、tracked operator default 和 scale-out RDMA selector。`vendor` 是
-任意规范化 metadata，不限于 AMD 或 NVIDIA；`runtime` 选择执行路径，并且是一个封闭集合
-（`runtime/config.py` 中的 `ACCELERATOR_RUNTIMES`），因为它决定了一个 case 能使用哪个
-基准测试入口与哪一族 launcher：`cuda`/`hip` 运行 `bench/run_ep.py`（torch、NCCL/RCCL，
-每个 rank 一个进程），`tpu` 运行 `bench/run_ep_jax.py`（JAX、XLA collective，每台主机
-一个进程）。因此新增其他 vendor 不需要修改 vendor allowlist，但新的 runtime 或 collective
-实现仍需兼容的入口与 launcher。当 SKU 的跨主机 fabric 不是 RDMA 时，可选的
-`scale_out_transport` 字段用于声明它（TPU 主机使用 `dcn`），从而避免把 scale-out 条目
-标注成集群实际不具备的 fabric。Operator 文档可以覆盖 default。Launcher 只声明并
-检查自身真正需要的字段。`sweep_matrix.py` 从 placement 字段推导 EP topology；默认 sweep
-包含每个已注册 SKU。
+所有公开的逐 SKU 平台数据都位于受跟踪的 `configs/platform_config.json` 注册表中：
+架构/产品、厂商、加速器运行时、容器镜像及平台、固定放置方式、
+启动器、可运行的 backend/EP 组合、scale-out `fabric` 标识（NIC 和交换机，因此即使使用相同 GPU，
+采用不同 fabric 的集群也是不同条目，例如第二个 b200 集群）、受跟踪的运维人员
+默认值，以及 scale-out RDMA 选择器。`vendor` 是任意的规范化元数据，并不
+局限于 AMD 或 NVIDIA；`runtime` 用于选择执行路径，并且是一个闭集
+（`runtime/config.py` 中的 `ACCELERATOR_RUNTIMES`），因为它决定用例可以使用哪个基准测试入口点和
+启动器系列：`cuda`/`hip` 运行 `bench/run_ep.py`（torch、NCCL/RCCL，每个
+rank 一个进程），而 `tpu` 运行 `bench/run_ep_jax.py`（JAX、XLA collectives，每台主机一个进程）。因此，
+添加其他厂商并不需要修改厂商允许列表，但新的
+运行时或 collective 实现仍然需要其自身兼容的入口点和启动器。
+可选的 `scale_out_transport` 字段用于在 SKU 的跨主机 fabric 并非 RDMA 时为其命名
+（TPU 主机使用 `dcn`），因此 scale-out 行绝不会被标记为集群并不具备的 fabric。
+运维人员文档可以覆盖默认值。启动器会
+声明并检查其实际需要的字段。`sweep_matrix.py` 根据
+放置字段推导 EP 拓扑。默认情况下，sweep 包含每个已注册的 SKU。
 
-每个被选中的非 MNNVL EP16 placement 还需要 operator 批准的 `socket_ifname` 和
-`rdma_devices`；也允许配置 `ib_gid_index`、`rdma_service_level`、
-`rdma_traffic_class` 和 `rail_isolated`。Service level 与 traffic class 会映射到
-MoRI 的 RDMA/IO QoS 环境。CollectiveX 不会启发式选择 management route 或 HCA。
-Allocation 后，每个非 MNNVL scale-out node 必须证明所有已配置 interface 和 active HCA
-port 存在，之后才可初始化 backend。Scale-up 和 MNNVL job 会清除这些 override。
-Scale-out NCCL/RCCL 固定为 `IB` 并使用 exact-match HCA selector，使 socket fallback
-直接失败而不是被误标为 RDMA。Scale-out 还设置 `NCCL_IB_MERGE_NICS=0`，避免 dual-port
-NIC fusion 禁用 DeepEP V2 EP16 hybrid path 所需的 NCCL GIN；`rail_isolated=1` 的
-multi-plane fabric 还会设置 `NCCL_CROSS_NIC=0`。
+每个选定的非 MNNVL EP16 放置还需要为其经运维人员批准的 fabric 配置
+`socket_ifname` 和 `rdma_devices`。`ib_gid_index`、`rdma_service_level`、`rdma_traffic_class`
+和 `rail_isolated` 也在可选允许列表中。服务级别和流量类别会映射到 MoRI 的
+RDMA/IO QoS 环境。
+CollectiveX 不会通过启发式方法选择管理路由或 HCA。资源分配后，每个
+非 MNNVL scale-out 节点必须在 backend 设置前证明所有已配置的接口和活动 HCA 端口均存在。
+Scale-up 和 MNNVL 作业会清除这些覆盖项。Scale-out NCCL/RCCL 被固定为 `IB`，
+并使用精确匹配的 HCA 选择器，因此套接字回退会失败，而不会被错误标记为 RDMA。
+Scale-out 还会禁用 NCCL 双端口 NIC 融合（`NCCL_IB_MERGE_NICS=0`）：融合设备会禁用
+NCCL GIN，而 DeepEP V2 EP16 混合路径需要它；采用 rail 隔离的 fabric
+（`rail_isolated=1`，例如 B300 的多平面 RoCE）还会额外设置 `NCCL_CROSS_NIC=0`。
 
-仅当所有已选 HCA port 都报告 Ethernet link layer 时才应用 `ib_gid_index`，用于选择
-operator 批准的 RoCE GID。原生 InfiniBand profile 保留显式 HCA 与 service level
-pinning，但不设置 RoCE-only GID override。混合 Ethernet 与 InfiniBand 的 HCA list
-会被拒绝。
+仅当所有选定的 HCA 端口都报告以太网链路层时，才会应用 `ib_gid_index`，此时它
+选择经运维人员批准的 RoCE GID。原生 InfiniBand 配置文件会保留显式 HCA 和服务
+级别固定，但不会设置仅适用于 RoCE 的 GID 覆盖项，以便 NVSHMEM/NCCL 使用原生 LID 路径。
+混合使用以太网和 InfiniBand 的 HCA 列表会被拒绝。
 
-`stage_dir` 是 checkout 和 workflow workspace 之外、预先存在且由 runner 拥有的
-非 symlink base，不可由 group 或 world 写入，并在 runner 与所有 allocated node 上以
-同一路径可见。Job 只创建带 marker 的 mode-0700 execution child，验证跨节点读写可见性，
-并在 allocation teardown 后仅删除该 child；不会 mount runner checkout，也不会在 AMD
-image storage 下创建 stage。AMD operator row 未提供 `stage_dir` 时，runner 会在其标准
-`_work` 目录旁的共享 runner filesystem 上派生 private base；root-owned squash cache
-永远不会作为 repository stage。
+`stage_dir` 是 checkout 和工作流
+workspace 之外一个预先存在、由 runner 拥有且非符号链接的基础目录。它不允许组或其他用户写入，并且在 runner 和每个
+已分配节点上都能通过同一路径访问。作业只会创建一个带标记的 mode-0700 执行子目录，验证跨节点读写
+可见性，并在资源分配拆除后仅删除该子目录。它们绝不会挂载 runner
+checkout，也不会在 AMD 的镜像存储下创建 stage。当 AMD 运维人员条目省略 `stage_dir` 时，
+runner 会在共享 runner 文件系统上其标准 `_work` 目录旁边派生一个私有基础目录。
+绝不会将 root 拥有的 squash 缓存用作仓库 stage。
 
-H200、B200 和 B300 runner 可省略 `stage_dir`；其 isolated execution child 会创建在
-已验证的 operating-system account home 下的 mode-0700 base 中，与 workflow 临时
-`HOME` 无关。H100 也可省略 `stage_dir`，其 private base 位于 shared container directory
-旁而非目录内，以确保 compute-visible。Canonical B300 execution 忽略旧版配置的
-`stage_dir`，总是使用已验证且 compute-visible 的 account-home base；execution-ID
-suffix 用于隔离并行 B300 worker。Canonical GB300 execution 同样忽略旧版 group-writable
-`stage_dir`，并在已验证的 compute-visible account home 下派生 execution-specific
-private base。每个 node 的 backend preparation 都从该 staged tree 运行。
+H200、B200 和 B300 runner 可以省略 `stage_dir`。它们的隔离执行子目录会创建在
+经验证的操作系统账户主目录中的 runner 自有 mode-0700 基础目录下，与
+工作流的临时 `HOME` 无关。H100 也可以省略 `stage_dir`。它的私有基础目录创建在已配置的共享容器目录旁边，而绝不位于
+该目录之下，因此计算节点可见。规范的 B300 执行会
+忽略任何旧版配置的 `stage_dir`，并始终使用经验证、计算节点可见的账户主目录
+基础目录。执行 ID 后缀用于隔离并行 B300 worker。规范的 GB300 执行同样
+会忽略其旧版、组可写的 `stage_dir`，并在经验证、计算节点可见的账户主目录下派生一个
+执行专属的私有基础目录。backend 准备工作会在每个节点上从该 staged 目录树运行。
 
-Enroot 会按 image tag 和 image platform 将配置的 image 导入 per-run-scoped squash，
-因此不会跨 run 复用导入的 filesystem。Image tag 与 platform 是 per-SKU registry 字段。
-DeepEP V2 source pin 位于 `runtime/common.sh`，其 build 会获取并验证固定 commit、检查
-`ElasticBuffer`，并缓存于按 architecture、image 与 commit 分键的 cluster-local build
-cache。只有固定的 `/cx-cache` mount 会进入 container。
+Enroot 会将配置的镜像标签导入到一个按单次运行限定作用域、以镜像标签和镜像
+平台为键的 squash 中，因此一次运行绝不会复用另一次运行导入的文件系统。镜像标签和平台是
+逐 SKU 注册表字段。DeepEP V2 源码固定版本位于 `runtime/common.sh` 中，其构建会
+在固定 commit 处获取并验证，检查是否包含 `ElasticBuffer`，然后缓存在一个
+以架构、镜像和 commit 为键的集群本地构建缓存中。只有固定的 `/cx-cache` 挂载
+会进入容器。
 
-## TPU Probe
+## TPU 探针
 
-TPU 路径是一个 probe，而不是 GPU backend 的对等实现；其差异都记录在 artifact 内，
-而不是留给读者自行推断。
+TPU 路径是一个探针，并非 GPU 后端的对等实现；相关差异会记录在 artifact 中，而不是留给读者自行推断。
 
-它运行在 GKE/ARC 的 `tpuv7` 池上，该池的 runner 是仅有 CPU 的 coordinator pod。这里没有
-Slurm、没有 enroot/pyxis、也没有共享文件系统，因此 `launchers/launch_tpu-gke.sh` 参照
-`runners/launch_tpuv7-gke.sh` 而非 `launch_single-slurm.sh`：它把 coordinator 上已固定
-的源码子树打包进一个 ConfigMap（约 120 KB，pod 内无需任何仓库凭据），为每个 shard 在
-`tpu7x` 节点上创建**一个** Kubernetes Job，在同一个 pod 内运行全部 case，使首个 case 之后
-的每个 case 都能复用节点本地的 XLA 编译缓存，并通过 pod log 取回结果 JSON。失败或部分完成
-的 leg 仍会上传它已经产出的内容。
+它运行在 GKE/ARC `tpuv7` 池上，其 runner 是一个仅含 CPU 的协调器 pod。这里没有 Slurm，
+没有 enroot/pyxis，也没有共享文件系统，因此 `launchers/launch_tpu-gke.sh` 仿照的是
+`runners/launch_tpuv7-gke.sh`，而不是 `launch_single-slurm.sh`：它将协调器中
+已固定版本的源代码子树打包到 ConfigMap 中（约 120 KB，pod 内不需要仓库凭据），为每个 shard
+在 `tpu7x` 节点上启动一个 Kubernetes Job，在该 Job 中运行所有 case，并通过 pod 日志
+回收结果 JSON。在 EP16 下，该 Job 为 **Indexed**，slice 的每台主机各有一个 pod，
+并配有一个无头 Service，因此 GKE 会注入 `TPU_WORKER_ID`/`TPU_WORKER_HOSTNAMES`，供
+`jax.distributed.initialize()` 使用；每个 pod 都计算相同的行，由完成索引为 0 的 pod
+写入 artifact，而回收过程读取的也是这个 pod（`jax.process_index()` 并不跟踪 pod 索引，
+因此若以它为依据，有一半时间会从错误的 pod 回收）。标红或部分完成的 leg 仍会提交其已生成的所有内容。
 
-有两项性质与 GPU 系列不同，且每一项都在 artifact 中标明：
+有两个属性与 GPU 系列不同，并且每个属性都会在 artifact 中明确标注：
 
-- `measurement.timing_source` 为 **`xla-device-trace-span`**。JAX 没有等价于
-  `torch.cuda.Event` 的公开接口，因此本 probe 改从 XLA profiler trace 读取设备时间：取
-  **span**（component scope 的首个 start 到最后一个 end，而非各 op 时长之和），跨设备按
-  **MAX** 归约（按 occurrence），并使用原始百分位。这与 GPU SKU 的 CUDA event 属于同一
-  *类型*的数字——芯片时间，不含主机 dispatch 开销。
+- `measurement.timing_source` 为 **`xla-device-trace-span`**。JAX 没有与
+  `torch.cuda.Event` 对等的公开 API，因此该探针改为从 XLA profiler trace 中读取设备时间：采用 SPANS
+  （某个组件作用域从首次开始到最后结束，而非操作时长之和），每次 occurrence 在各设备间取 MAX 进行归约，
+  使用 RAW 百分位数。这与 GPU SKU 的 CUDA event 属于同一*类*数值，即芯片时间，不包含主机 dispatch 开销。
 
-  主机 wall-clock 仍以每行的 `host_latency_us` 作为交叉校验，并作为**需显式开启**的回退
-  （`--allow-host-fallback`）。它绝不作为头条数字：其每次调用的 dispatch 下限与负载相关，
-  可达数千微秒；因此某个点若拿不到设备 span，该 case 直接失败，而不会悄然发布一个主机数字
-  冒充可比的结果。计时来源**按 component 记录**（`row.timing_source`），因为 profiler 可能
-  覆盖部分 component 而遗漏其他。
+  `host-wallclock-blocked` 仍作为回退方案保留，并且是**选择启用**的（`--allow-host-fallback`），
+  这是有意为之：tpu7x 上的主机挂钟时间包含一个与 payload 相关的单次调用 dispatch 下限，
+  可高达数千微秒，因此如果将主机测量值当作可比较数据发布，在小 token 端会严重失真。若未指定该标志，
+  某个 point 无法产生设备 span 时会使该 case 失败，而不是静默降级。来源信息按组件记录
+  （`row.timing_source`），因为 profiler 可能覆盖某些组件而未覆盖另一些组件，而此前使用整个 case
+  的标签时，曾将实际采用主机计时的行误标为设备计时。
 
-  早先的版本改用**摊销**（在单个程序内串联 N 次操作以摊薄主机下限，`--in-program-iters`）。
-  设备 span 使其不再必要，该标志已从代码中移除；若在别处看到对它的引用，那处引用已过时。
-- `components.stage` 在 **BF16 行**上为 `unavailable`：permute 已融合进 dispatch，且不存在
-  精度转换，没有独立的 staging pass 可计时。**FP8 行会发布 `stage`**——即 fp8→bf16 转换，
-  它被提出到 combine 与链式 roundtrip 之外单独计时，这正是 `roundtrip + stage` 能重建
-  mismatched-config 成本的原因。与 GPU 的 `native` 行比较时不要把 `stage` 加进 `roundtrip`；
-  与 `CX_FP8_CONSUME=dequant` 行比较时才需要相加。Per-destination layout（offset、size、gather index）在主机侧预先计算并排除
-  在计时区间之外，与 DeepEP layout pass 的处理方式一致；而设备上的 permute gather 与
-  combine 的 scatter-add **在**计时区间内，因为生产路径同样要付出这部分代价。
-- `implementation.oracle` 为 `probe-source-identity-and-exact-rank-sum`，比 GPU harness
-  的完整 per-expert transform oracle 更窄。它依然验证了真实性质：每个 dispatch 出去的副本
-  都会被解码回它所声称的 source token 并做逐位比较，其落位 offset 会与 exchange plan 校
-  验，combine 结果会与精确的期望 unweighted rank-sum 比较。由于 expert 取恒等映射，因此
-  不建模 per-expert transform。
+  较早的修订版本改用摊销方式，在一个程序内串联 N 次操作以均摊主机下限
+  （`--in-program-iters`）。设备 span 使其不再必要，该标志现已移除；如果你发现对它的引用，
+  则该引用已过时。
+- 在 **BF16 行上**，`components.stage` 为 `unavailable`：permute 已融合到 dispatch 中，
+  且没有转换，因此没有可计时的内容。**FP8 行会发布该项**，即 fp8→bf16
+  转换；它被移出 combine 和串联的 roundtrip，并单独测量，因此
+  `roundtrip + stage` 能够重建配置不匹配时的成本。与 GPU `native` 行比较时，不要将 `stage`
+  加到 `roundtrip`；与 `CX_FP8_CONSUME=dequant` 行比较时则应相加。每个 destination 的布局
+  （offset、size、gather index）在主机上预计算，并排除在计时区域之外，这与 DeepEP 的 layout pass
+  所采用的处理方式相同；设备上的 permute gather 和 combine scatter-add **会**计时，因为生产环境会承担这些成本。
+
+- `implementation.oracle` 为 `probe-source-identity-and-exact-rank-sum`，其范围比 GPU
+  测试框架的完整逐专家变换预言机更窄。它仍然证明了真实有效的性质：每个 dispatch 的副本
+  都会被解码回其所声明的源 token（ID 携带在前几列的 SIGN 中，因此可在量化后保留），
+  其落点偏移会根据交换计划进行检查，并将 combine 与精确的预期 rank-sum 进行比较。
+  专家执行恒等变换，因此不对逐专家变换建模。
+
+  在 BF16 下，payload 会与源数据逐比特比较。在 FP8 下则特意不会这样做，而在有人“修复”
+  它之前，有必要了解其中的原因：同一量化方案的两次 XLA 编译会以相反方向舍入该点阵的
+  e4m3 中点（实测结果为线上传输了 `161/256`，而独立程序生成了 `152/256`），因此通过
+  再次量化重新推导期望值无异于抛硬币。GPU 测试框架之所以比较重新量化后的比特，仅仅是
+  因为 `assert_quantize_identity` 首先在实际硬件上确立了这一前提。这里改为：将到达的
+  chunk 与同一次执行中 STAGED 的 chunk 逐字节比较；根据 dispatch 实际交付的行对 combine
+  进行评分，并依据各行的 payload 所声明的 token 将其归属到相应 token；同时，由于计时程序
+  与预言机程序来自两次独立编译，还会将计时程序自身的 scale 和反量化值关联回预言机程序
+  中的对应值。该链路中的任何环节都不会重新量化任何内容。
 
 ### 链式 pair period
 
-`pair_period` 与 `roundtrip` 是**不同的量**：前者是永不排空的流水线中一对
-dispatch→combine 的稳态周期，后者是从空闲进入的单对延迟。不要相加，也不要互相替代。
-`--chain-iters`（默认 64）对在同一个编译程序内运行，每次迭代的结果作为下一次的输入 ——
-这是真实的数据依赖，而非 `optimization_barrier`：barrier 只约束顺序而不保证存活，XLA 会
-直接删除无人消费的计算。
+`pair_period` 与 `roundtrip` 是**不同的量**：它表示在一条始终不排空的链中，一个
+dispatch→combine 对的稳态周期；而 `roundtrip` 表示从空闲状态进入的一个操作对。不要将二者
+相加，也不要相互替代。`--chain-iters`（默认 128）个操作对在同一个已编译程序中运行。
+每个操作对的 carry 都会馈入下一个操作对，形成真实的数据依赖，而不是使用
+`optimization_barrier`，因为 barrier 只约束顺序、不保证活性，XLA 仍会删除无人消费的计算。
 
-**链式程序必须做重归一化。** combine 是无权重的 rank-sum，因此一对会把 token `t` 乘以
-`d_t`（其唯一目标 rank 数）—— 对 deepseek-v3 top-8 实测 EP8 为 3..7，EP16 为 4..8。
-64 次迭代即 `d_t**64`，而 bf16 上限为 3.39e38：不做归一化时第 43 次迭代出现第一个溢出，
-**EP16 在第 64 次时 100% 的元素为 inf**。循环体在转回 bf16 之前用 fp32 除以 `d_t`，使
-一对恰好成为**逐位**恒等（`d_t ≤ 8` 个 bf16 值的 fp32 求和是精确的，IEEE 除法为正确舍入）。
-下发的是计数而非 `1/d`：实测 20 万个值中，`(d*v)*float32(1/d)` 在 `d == 7` 时有 58% 与 `v`
-不符，而两种布局中都存在 7 个目标 rank 的 token。
+**链必须重新归一化，而且这是必需的。** Combine 是无权重 rank-sum，因此一个操作对会将
+令牌 `t` 乘以 `d_t`，即其唯一目标 rank 数，在 deepseek-v3 top-8 上实测 EP8 为 3..7、
+EP16 为 4..8。迭代 64 次后得到 `d_t**64`，而 bf16 的上限是 3.39e38：若不重新归一化，
+第一个元素会在第 43 次迭代饱和，并且到第 64 次时 **EP16 的元素有 100% 都是无穷大**。
+主体在转回 bf16 前将 fp32 rank-sum 除以 `d_t`，使一个操作对在比特级保持恒等（`d_t ≤ 8`
+个 bf16 值副本的 fp32 求和是精确的，IEEE 除法也会正确舍入）。传递的是计数值，而不是
+`1/d`：在超过 200k 个值中，`(d*v)*float32(1/d)` 对 `d == 7` 的值有 58% 与 `v` 不同，
+而两种布局中都会出现七个目标。
 
-`correctness.chain_regime_passed` 即该恒等校验，在被计时的程序上评分并跨主机归约。
-**三态**：`true` 通过；`false` 表示校验已运行且不一致（该行判为失败）；`null` 表示无法
-评估（撤下 period，但不牵连同一 case 中已测得的 drained 组件）。drained oracle 无法覆盖
-该状态 —— 它只检查从空闲进入的单对，因此仅在自由运行时损坏的传输会表现为全套中最快的。
+`correctness.chain_regime_passed` 用于判定这种恒等性；它在计时程序上评分，并跨主机归约。
+它是**三态**的：`true` 表示通过，`false` 表示已运行但不一致（会使该行失败），`null` 表示
+无法评估（会隐去 period，但不会否定同一用例中测得的 drained component）。Drained oracle
+无法覆盖该 regime。它始终只检查从空闲状态进入的一个操作对，因此仅在自由运行操作对下
+发生破坏的传输可能会成为套件中看起来最快的实现。
 
-`chain_floor_us` 按方向分别发布，`origin: chained-cross-rank-min`。候选为每设备恰好出现
-`--chain-iters` 次的 collective；随后按其出现的 device row 集合分组，锚点取自**总时长最高
-且本身就能配对（成员 ≥2）的那个 row 组**中时长最高的两个 op。按 row 分组是两个锚点可比的
-前提：tpu7x 有多种核心，只在部分 row 上出现的 `sparse-core-…` op 可能在总时长上胜出，而
-落在大小相同却**互不相交**的 row 集合上的两个 op 无论多大都不构成一对 —— 按 row 集合
-**大小**择优的规则只在 10 个点中的 2 个发布了 floor，比它取代的 5/10 更差。「成员 ≥2」
-这一条另有作用：否则一个独占 sparse-core row 的大 op 会凭总时长胜出，该点最终因只剩单个
-候选而失败。入选的一对还须呈 d,c,d,c 交错。方向由每次迭代的起始顺序确定。
-任一条件不满足时，**两个**方向均发布 `unavailable` 并附原因；此处的 null 表示"未测量"，
-绝不表示"与另一个相同"。`chain_health.anchor.phase` 给出 combine 锚点在周期中的相位 ——
-~0.5 为真实配对，~0 或 ~1 表示两个锚点同属一个方向，而仅靠交错检查无法区分这一情形。
+`chain_floor_us` 按方向给出，`origin: chained-cross-rank-min`。候选项是在每台设备上恰好出现
+`--chain-iters` 次的 collective；随后按它们出现的设备行集合分组，anchor 是**能够组成操作对的
+最繁忙行组**（至少 2 个 op）中总时长最高的两个 op。按行分组才能保证两个 anchor 可比：
+tpu7x 会记录不止一种 core，因此 `sparse-core-…` op 的总时长可能超过真正的 anchor；两个
+出现在大小相同但彼此**不相交**的行集合上的 op，无论多大也不能组成操作对。按行集合
+**大小**选择的规则只在 10 个 point 中的 2 个发布了 floor，比它替代的 5/10 更差。
+`≥2` 的资格条件也同样重要：否则，sparse-core 行上的单个大型 op 会凭总时长获胜，导致该
+point 只剩一个候选项而失败。最终留下的操作对还必须按 d,c,d,c 交错。方向由每次迭代的开始
+顺序确定。如果任一 gate 失败，**两个**方向都以相应原因为 `unavailable`；这里的 null 表示
+“未测量”，绝不表示“与另一个方向相同”。`chain_health.anchor.phase` 报告 combine anchor
+在 period 内开始的位置，约 0.5 表示真正的操作对，约 0 或 1 表示两个 anchor 都属于同一
+方向，这是仅靠交替无法发现的。
 
-**移植到新 SKU 时值得做的交叉验证：** 若两个锚点确为前后相接的 dispatch 与 combine，
-则 `phase` 应当跟随 `chain_floor_us.dispatch / pair_period` —— 因为 combine 正是在
-dispatch 的 collective 结束时开始。二者来自相互独立的量（前者取自起始时间戳，后者取自
-op 时长），因此二者吻合可以证明方向**标签**正确，而不仅仅是自洽。bf16 实测
-（run 31194062843），跨 128 倍规模范围与两种 EP 规模：
+**在任何新 SKU 上都值得执行的交叉检查：**如果 anchor 确实是首尾相接的 dispatch 和 combine，
+`phase` 应跟随 `chain_floor_us.dispatch / pair_period`，因为 combine 会在 dispatch collective
+结束时开始。二者来自相互独立的量，前者来自开始时间戳，后者来自 op 时长，因此一致性是
+方向**标签**正确的证据，而不只是内部自洽。在 bf16 上（运行 31194062843），跨 128x 尺寸
+范围和两个 EP degree 的测量如下：
 
 | T | `floor_dispatch / period` EP8 | `phase` EP8 | `floor_dispatch / period` EP16 | `phase` EP16 |
 |--:|--:|--:|--:|--:|
@@ -261,34 +372,34 @@ op 时长），因此二者吻合可以证明方向**标签**正确，而不仅�
 | 512 | 0.276 | 0.294 | 0.287 | 0.311 |
 | 8192 | 0.265 | 0.280 | 0.271 | 0.286 |
 
-全部 28 个链式行上 `phase` 均略高于该比值（最大差 0.064），符号正是预期的：floor 取跨 rank
-的 **min**，而 phase 测自真正决定链节奏的那个设备。若 `phase` 不跟随该比值，则无论交错多么
-整齐，这两个锚点都不是两个方向。
+在全部 28 个 chained 行上，`phase` 都略高于该比值（最大差距为 0.064），这正是预期的符号：
+floor 是跨 rank 的**最小值**，而 phase 则在真正决定链节奏的设备上测量。无论两个 anchor
+交错得多么规整，如果 `phase` 不跟随该比值，就说明它们并非两个方向。
 
-`chain_health` 与 GPU 系列的块结构一致（每个字段是带 `percentiles_us` 的 component，
-而非裸浮点数）：
+`chain_health` 与 GPU 系列的块形状一致（每个字段都是带 `percentiles_us` 的 component，
+而不是裸浮点数）：
 
 | 字段 | 含义 |
 |---|---|
-| `interpair_gap_us` | start-to-start 减去每次迭代中 chain scope 自身的跨度。接近零即自由运行。**实测 0.0–0.2 µs，占周期 0.0–0.1%**（EP8 与 EP16）。既不是两个 collective floor 之差，也不是 op 求和 —— 两者都把 permute 与 scatter-add 留在"gap"里，分别读出 47% 与 20–30%。 |
-| `settle_drift_us` | 各设备后半段与前半段 p50 之差，按带符号最大幅值归约。用于支持或推翻 `--chain-drop`。实测 ≤0.6 µs。 |
-| `pair_spread_us` | 每次迭代的跨设备离散度。 |
-| `devices` / `devices_expected` | EP16 下每个进程只能采集自己的 8 张卡，因此在归约前对逐设备周期矩阵做 allgather —— 缺失的那一半正是跨主机 straggler 所在。`gathered_across_hosts` 表示是否已聚合；`devices_expected` 诚实地保持为 16。 |
-| `op_inventory` | 链式循环体内每个 op 的逐迭代耗时。这使 fp8 的排除成为可核查的事实而非论断。 |
-| `renorm_us` | **`unavailable`，且属预期**：XLA 将该除法融合进相邻的 cast，没有 op 携带该 scope。其代价由跨运行差分限定在周期的 ≤0.05%，而非直接测得。 |
-| `capture_s` / `capture_budget_s` | 链式采集相对 launcher 自身每 case 超时的开销。实测 13–22 秒 / 2700 秒。 |
+| `interpair_gap_us` | 每次迭代的 start-to-start 减去链 scope 自身的 extent。接近零表示自由运行。EP8 和 EP16 上**实测为 0.0–0.2 µs，占 period 的 0.0–0.1%**。它既不是 collective floor，也不是 op 总和，因为这两者都会把 permute 和 scatter-add 留在“gap”内，分别读出 47% 和 20–30%。 |
+| `settle_drift_us` | 每台设备后半段减前半段的 p50，并按带符号的最大幅值归约。用于支持或否定 `--chain-drop`。实测 ≤0.6 µs。 |
+| `pair_spread_us` | 每次迭代的跨设备 spread。 |
+| `devices` / `devices_expected` | 在 EP16 下，每个进程只对本地 8 台设备做 profile，因此每台设备的 period 矩阵会在归约前执行 allgather，缺失的另一半恰恰是可能出现跨主机 straggler 的位置。`gathered_across_hosts` 表示是否完成该步骤；`devices_expected` 始终如实保持为 16。 |
+| `op_inventory` | 链主体中的每个 op，按迭代列出。这使 fp8 排除项可检查，而不只是一项论断。 |
+| `renorm_us` | **`unavailable`，而且理应如此**：XLA 会把除法融合进相邻的 cast，因此没有任何 op 带有该 scope。其成本通过跨运行差分限定为 period 的 ≤0.05%，而非直接测得。 |
+| `capture_s` / `capture_budget_s` | 链 capture 相对于 launcher 自身 per-case timeout 的开销。实测为 13–22 s，而预算为 2700。 |
 
-**fp8 有意不做链式测量。** 其 combine 需要 BF16，因此链式 fp8 循环体必须把 fp8→bf16 转换
-放进循环内，周期就会包含 `native` 契约认定生产环境并不单独执行的工作。fp8 行的
-`implementation.chained_period` 为 `false`，链式字段为 `unavailable` 并附该原因 ——
-而不是悄悄缺失。
+**FP8 被有意排除在链式测量之外。**它的 combine 需要 BF16，因此 chained fp8 主体会把
+fp8→bf16 转换带入循环，使 period 包含 `native` contract 所规定生产环境不会单独执行的工作。
+FP8 行上的 `implementation.chained_period` 为 `false`，chained 字段也会以该原因为
+`unavailable`，而不是静默缺失。
 
-工作负载身份**与** GPU 系列共享：`bench/routing_np.py` 是 `bench/routing.py` 的 numpy
-移植并有 parity 测试（TPU 镜像没有可用的 torch），因此两个系列使用完全相同的 routing trace
-与完全相同的 activation 字节，并按同一个去重后的 (token, destination-rank) payload unit
-计费。`tests/test_tpu_probe.py` 在 torch 可导入时逐元素断言该 parity，不可导入时以 golden
-digest 固定；它还用纯 numpy 模拟整个 exchange plan，使 offset 或转置错误在本地即失败，而不
-是二十分钟后在 TPU 节点上才暴露。
+工作负载标识与 GPU 系列**完全共享**：`bench/routing_np.py` 是经过一致性测试的
+`bench/routing.py` NumPy 移植版（TPU 镜像中没有可用的 torch），因此两个系列测量完全相同的
+routing trace 和 activation byte，并使用相同的去重后（token、destination-rank）payload
+单元计费。只要 torch 可导入，`tests/test_tpu_probe.py` 就会逐元素断言两者一致；无法导入时
+则固定一个 golden digest。该测试还会在纯 NumPy 中模拟完整 exchange plan，因此 offset 或
+transpose 错误会在本地失败，而不是到 TPU 节点上才失败。
 
 ## 本地检查
 
@@ -298,5 +409,5 @@ python3 experimental/CollectiveX/sweep_matrix.py --backend all --out /tmp/cx-mat
 bash -n experimental/CollectiveX/runtime/*.sh experimental/CollectiveX/launchers/*.sh
 ```
 
-核心路径为 `configs/`、`sweep_matrix.py`、`summarize.py`、`bench/`、`runtime/`、
-`launchers/` 和 `tests/`。
+核心路径包括 `configs/`、`sweep_matrix.py`、`summarize.py`、`bench/`、`runtime/`、`launchers/`
+和 `tests/`。

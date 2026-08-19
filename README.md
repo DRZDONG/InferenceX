@@ -1,10 +1,10 @@
 #  InferenceX™, Open Source Continuous Inference Standard and Research Platform / 开源持续推理标准与研究平台
 <p align="center">
-  <a href="https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
-  <a href="https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pulls"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
+  <a href="https://github.com/SemiAnalysisAI/InferenceX/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
+  <a href="https://github.com/SemiAnalysisAI/InferenceX/pulls"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
   <a href="https://inferencex.semianalysis.com/"><img alt="Dashboard" src="https://img.shields.io/badge/Performance-Dashboard-blue"></a>
-  <a href="https://deepwiki.com/SemiAnalysisAI/InferenceX-Private-TPU"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
-  <a href="https://github.com/SemiAnalysisAI/InferenceX-Private-TPU"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/SemiAnalysisAI/InferenceX-Private-TPU?style=social"></a>
+  <a href="https://deepwiki.com/SemiAnalysisAI/InferenceX"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
+  <a href="https://github.com/SemiAnalysisAI/InferenceX"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/SemiAnalysisAI/InferenceX?style=social"></a>
 </p>
 <div align="center">
 
@@ -21,7 +21,7 @@ Trusted by Operators of Trillion Dollar Token Factories such as OpenAI, Meta, Mi
 - **[2026/03]** 🔥 Qwen3.5 397B: continuous benchmarks live since Day 0 [dashboard](https://inferencex.semianalysis.com/)
 - **[2026/03]** Added Kimi K2.5 (same architecture as Kimi 2.7-Code), GLM5 (same arch as GLM5.1), and MiniMax M2.5 (same arch as MiniMax M2.7) [dashboard](https://inferencex.semianalysis.com/)
 - **[2026/02]** GB300 NVL72: added to InferenceX & continuously benchmarked [SGLang Maintainer Lmsys Blog](https://www.lmsys.org/blog/2026-02-20-gb300-inferencex/)
-- **[2026/02]** 🔥 InferenceX v2 launch — NVIDIA Blackwell vs AMD vs Hopper [article](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs)
+- **[2026/02]** 🔥 InferenceX v2 launch comparing NVIDIA Blackwell, AMD, and Hopper [article](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs)
 - **[2025/10]** 🔥 InferenceX (formerly InferenceMAX) v1 launch [article](https://newsletter.semianalysis.com/p/inferencemax-open-source-inference)
 
 ## Introduction
@@ -29,7 +29,7 @@ Trusted by Operators of Trillion Dollar Token Factories such as OpenAI, Meta, Mi
 InferenceX™ (formerly InferenceMAX) is an inference performance research platform dedicated to continually analyzing & benchmarking the world’s most popular open-source inference frameworks used by major token factories and models to track real performance in real time. As these software stacks improve, InferenceX™ captures that progress in near real-time, providing a live indicator of inference performance progress. A [open sourced](https://github.com/SemiAnalysisAI/InferenceX-app) live dashboard  is available for free publicly at https://inferencex.com/. 
 
 > [!IMPORTANT]
-> Only [SemiAnalysisAI/InferenceX-Private-TPU](https://github.com/SemiAnalysisAI/InferenceX-Private-TPU) repo contains the Official InferenceX™ result, all other forks & repos are Unofficial. The benchmark setup & quality of machines/clouds in unofficial repos may be differ leading to subpar benchmarking. Unofficial must be explicitly labelled as Unofficial.
+> Only [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) repo contains the Official InferenceX™ result, all other forks & repos are Unofficial. The benchmark setup & quality of machines/clouds in unofficial repos may be differ leading to subpar benchmarking. Unofficial must be explicitly labelled as Unofficial.
 > Forks may not remove this disclaimer
 
 <img width="2544" height="1424" alt="InferenceX DeepSeekv4 MXFP4 Performance Curve" src="https://github.com/user-attachments/assets/cc50b671-0a54-40b6-b184-19d5a59590cb" />
@@ -59,6 +59,7 @@ This pace of software advancement creates a challenge: benchmarks conducted at a
 | MI300X | ✅ |
 | H200 | ✅ |
 | H100 | ✅ |
+| TPUv7x Ironwood Ghostfish | Coming Soon 🔜 |
 | MI455 UALoE72 | Coming Soon 🔜 |
 | Vera Rubin NVL72 | Coming Soon 🔜 |
 | Rubin NVL8 | Coming Soon 🔜 |
@@ -72,6 +73,7 @@ This pace of software advancement creates a challenge: benchmarks conducted at a
 ## Contributing
 
 PRs are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for more details on the PR review flow, the [PR Review Checklist](./docs/PR_REVIEW_CHECKLIST.md), and the merge process.
+For the maintainer and agent documentation map, start with [`docs/index.md`](./docs/index.md). It links the architecture, configuration, workflow, eval, runner, and troubleshooting references.
 
 ## Acknowledgements & Supporters
 Thank you to Lisa Su and Anush Elangovan for providing the MI355X and CDNA3 GPUs for this free and open-source project. We want to recognize the many AMD contributors for their responsiveness and for debugging, optimizing, and validating performance across AMD GPUs. 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,7 @@ from validate_perf_changelog import (
 
 def entry(
     key: str,
-    link: str = "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1",
+    link: str = "https://github.com/SemiAnalysisAI/InferenceX/pull/1",
 ) -> dict[str, object]:
     return {
         "config-keys": [key],
@@ -48,12 +47,12 @@ def test_parse_changelog_rejects_malformed_nested_entry() -> None:
     - config-a
   description:
     - Update config-a
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1
   - config-keys:
     - config-b
   description:
     - Update config-b
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/2
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/2
 """
 
     with pytest.raises(ChangelogValidationError, match="not valid YAML"):
@@ -67,7 +66,7 @@ def test_parse_changelog_rejects_duplicate_mapping_keys() -> None:
     - First
   description:
     - Second
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1
 """
 
     with pytest.raises(ChangelogValidationError, match="duplicate key"):
@@ -88,7 +87,7 @@ def test_compare_entries_rejects_wrong_pr_link_on_append() -> None:
     base = [entry("config-a")]
     added = entry(
         "config-b",
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/41",
+        "https://github.com/SemiAnalysisAI/InferenceX/pull/41",
     )
 
     with pytest.raises(ChangelogValidationError, match="new PR entry"):
@@ -107,7 +106,7 @@ def test_compare_entries_allows_pr_link_only_correction() -> None:
     head = [
         entry(
             "config-a",
-            "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/42",
+            "https://github.com/SemiAnalysisAI/InferenceX/pull/42",
         )
     ]
 
@@ -136,7 +135,7 @@ def test_compare_entries_rejects_correction_mixed_with_append() -> None:
     head = [
         entry(
             "config-a",
-            "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/42",
+            "https://github.com/SemiAnalysisAI/InferenceX/pull/42",
         ),
         entry("config-b", "XXX"),
     ]
@@ -187,7 +186,7 @@ def test_raw_correction_rejects_whitespace_only_history_change() -> None:
     base = render([entry("config-a", "XXX")])
     corrected = base.replace(
         b"  pr-link: XXX\n",
-        b"  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/42\n",
+        b"  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/42\n",
     )
 
     validate_raw_change(base, corrected, additions=0, corrections=1)
@@ -272,69 +271,15 @@ def test_matrix_compatible_check_forwards_eval_modifiers(
     assert calls == [(True, True)]
 
 
-def test_matrix_compatible_check_rejects_deleted_historical_entry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    changelog = tmp_path / "perf-changelog.yaml"
-    base_raw = render(
-        [
-            entry("config-to-delete"),
-            entry("config-to-keep"),
-        ]
-    )
-    head_raw = render([entry("config-to-keep")])
-
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"],
-        cwd=tmp_path,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-    )
-    changelog.write_bytes(base_raw)
-    subprocess.run(["git", "add", changelog.name], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "base fixture"],
-        cwd=tmp_path,
-        check=True,
-    )
-    base_ref = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    changelog.write_bytes(head_raw)
-    subprocess.run(["git", "add", changelog.name], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "head fixture"],
-        cwd=tmp_path,
-        check=True,
-    )
-    head_ref = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    monkeypatch.chdir(tmp_path)
+def test_matrix_compatible_check_rejects_pr_1717_conflict_resolution() -> None:
     with pytest.raises(
         ChangelogValidationError,
-        match=r"Found deleted line: - config-keys:",
+        match=r"Found deleted line: +pr-link: .*pull/1798",
     ):
         validate_matrix_compatible_change(
-            base_ref,
-            head_ref,
-            changelog.name,
+            "add33814cce15d0b71e3c98eca4bb2f7ad8aba96",
+            "60bf726a7f324a01e8850d228c8f0f7a6f203dbd",
+            "perf-changelog.yaml",
         )
 
 

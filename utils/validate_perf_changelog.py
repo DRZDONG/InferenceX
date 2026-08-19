@@ -19,11 +19,11 @@ from matrix_logic.validation import ChangelogEntry
 
 
 CANONICAL_PR_LINK = re.compile(
-    r"https://github\.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/\d+"
+    r"https://github\.com/SemiAnalysisAI/InferenceX/pull/\d+"
 )
 PR_LINK_PLACEHOLDERS = {
     "XXX",
-    "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/XXX",
+    "https://github.com/SemiAnalysisAI/InferenceX/pull/XXX",
 }
 
 
@@ -151,7 +151,7 @@ def validate_added_pr_link(link: str, pr_number: int | None) -> None:
         return
 
     expected = (
-        f"https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/{pr_number}"
+        f"https://github.com/SemiAnalysisAI/InferenceX/pull/{pr_number}"
     )
     if link not in PR_LINK_PLACEHOLDERS and link != expected:
         raise ChangelogValidationError(

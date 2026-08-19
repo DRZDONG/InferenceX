@@ -397,7 +397,8 @@ class TpuWiringTests(unittest.TestCase):
         self.assertEqual(args.case_id, case["case_id"])
         self.assertEqual(args.scale_up_transport, "ici")
         self.assertEqual(args.gpus_per_node, 8)
-        self.assertTrue(args.out.startswith("results/tpuv7_jax-ragged-a2a_bf16_decode_"))
+        self.assertEqual(args.xprof_iters, 20)
+        self.assertEqual(args.out, f"results/{case['case_id']}_TS-c000.json")
 
     def test_terminal_failure_document_needs_no_jax_initialization(self) -> None:
         case = {
@@ -460,7 +461,12 @@ class TpuWiringTests(unittest.TestCase):
         self.assertEqual(document["measurement"]["rows"], [])
         self.assertEqual(document["identity"]["case_id"], case["case_id"])
         self.assertEqual(document["runtime"]["vendor"], "google")
-        self.assertIn("| failed | n/a | n/a | n/a |", summary)
+        self.assertIn("| failed | - | - | - | - | - |", summary)
+        self.assertEqual(document["workload"]["ladder_measured"], [])
+        self.assertEqual(document["workload"]["ladder_dropped"], [])
+        self.assertIsNone(document["workload"]["ladder_cap"])
+        self.assertEqual(document["implementation"]["combine_reduction"], "domain-fp32")
+        self.assertIsNone(document["implementation"]["library_version"])
 
     def test_shard_runner_reuses_one_process_for_every_case(self) -> None:
         observed = []
@@ -3134,7 +3140,7 @@ class ScaleUpDomainTests(unittest.TestCase):
 
     def test_an_eight_wide_nvlink_domain_still_goes_scale_out_at_ep16(self) -> None:
         matrix, platforms = self._platforms()
-        for sku in ("b200-dgxc", "b300", "h100-dgxc", "h200-dgxc", "mi355x"):
+        for sku in ("b200-nscale", "b300", "h100-dgxc", "h200-dgxc", "mi355x"):
             with self.subTest(sku=sku):
                 topology = matrix._topology(platforms[sku], 16)
                 self.assertEqual(topology["scope"], "scale-out")
@@ -3488,7 +3494,7 @@ class MultiHostShardMergeTests(unittest.TestCase):
         """GPU EP16 spans nodes over RDMA, where shards are independent allocations."""
         sys.path.insert(0, str(COLLX))
         import sweep_matrix  # noqa: PLC0415
-        for sku in ("b200-dgxc", "h100-dgxc", "mi355x"):
+        for sku in ("b200-nscale", "h100-dgxc", "mi355x"):
             with self.subTest(sku=sku):
                 self.assertEqual(
                     sweep_matrix._shard_precision_key(sku, 2, "fp8"), "fp8")
@@ -4024,6 +4030,39 @@ class ChainFieldsTests(unittest.TestCase):
         self.assertEqual(block["chain_trials"], 1)
         self.assertEqual(block["chain_drop"], 1)
         self.assertIn("pair_period", block["chain_governs"])
+
+    def test_row_components_nest_pair_period_and_sum_fp8_stage(self) -> None:
+        pcts = {
+            "dispatch": {"p50": 10.0, "p90": 11.0, "p95": 12.0, "p99": 13.0},
+            "stage": {"p50": 2.0, "p90": 3.0, "p95": 4.0, "p99": 5.0},
+            "combine": {"p50": 20.0, "p90": 21.0, "p95": 22.0, "p99": 23.0},
+            "roundtrip": {"p50": 25.0, "p90": 26.0, "p95": 27.0, "p99": 28.0},
+        }
+        period = {"availability": "measured", "percentiles_us": {"p50": 7.0}}
+        components = run_ep_jax._row_components(
+            pcts,
+            {"dispatch": 4, "stage": 4, "combine": 4, "roundtrip": 4},
+            period,
+        )
+
+        self.assertIs(components["pair_period"], period)
+        self.assertEqual(components["isolated_sum"]["percentiles_us"]["p50"], 32.0)
+
+    def test_row_components_treat_unavailable_stage_as_zero(self) -> None:
+        pcts = {
+            "dispatch": {"p50": 10.0},
+            "stage": None,
+            "combine": {"p50": 20.0},
+            "roundtrip": {"p50": 25.0},
+        }
+        components = run_ep_jax._row_components(
+            pcts,
+            {"dispatch": 1, "stage": 0, "combine": 1, "roundtrip": 1},
+            {"availability": "unavailable", "percentiles_us": None},
+        )
+
+        self.assertEqual(components["isolated_sum"]["percentiles_us"]["p50"], 30.0)
+        self.assertEqual(components["stage"]["availability"], "unavailable")
 
 
 def _deepseek_layout(ep_size: int, tokens: int, experts: int = 256, top_k: int = 8):
@@ -5139,10 +5178,10 @@ class ChainedDocsTests(unittest.TestCase):
         self.assertIn("### 链式 pair period", self._readme("README_zh.md"))
 
     def test_the_default_iteration_count_is_the_documented_one(self) -> None:
-        source = Path(run_ep_jax.__file__).read_text()
-        self.assertIn('"--chain-iters", type=int, default=64', source)
-        for name in ("README.md", "README_zh.md"):
-            self.assertIn("64", self._readme(name), name)
+        source = Path(ep_harness.__file__).read_text()
+        self.assertIn('"--chain-iters", type=int, default=128', source)
+        self.assertIn("default 128", self._readme())
+        self.assertIn("默认 128", self._readme("README_zh.md"))
 
     def test_the_tri_state_is_documented_in_both(self) -> None:
         """Documenting it as a boolean would invite a consumer to read null as false."""

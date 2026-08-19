@@ -2,10 +2,10 @@
 #SBATCH -p h200
 #SBATCH --gres=gpu:0
 #SBATCH --container-image=vllm/vllm-openai:nightly
-#SBATCH --container-mounts=/mnt/home/user/inferperf/qwen3.5:/workspace
+#SBATCH --container-mounts=/mnt/home/kimbo/inferperf/qwen3.5:/workspace
 #SBATCH --no-container-entrypoint
 #SBATCH --job-name=bmk-qwen35
-#SBATCH --output=/mnt/home/user/inferperf/qwen3.5/logs/bmk-client.log
+#SBATCH --output=/mnt/home/kimbo/inferperf/qwen3.5/logs/bmk-client.log
 
 set -euo pipefail
 

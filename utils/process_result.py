@@ -1,6 +1,6 @@
-import sys
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -22,6 +22,93 @@ def get_required_env_vars(required_vars):
     return env_values
 
 
+def get_optional_component_metadata(env_var):
+    """Parse strict optional component metadata from a JSON environment value."""
+    raw_value = os.environ.get(env_var)
+    if raw_value in (None, "", "null"):
+        return None
+
+    try:
+        metadata = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{env_var} must contain valid JSON") from exc
+
+    if not isinstance(metadata, dict) or set(metadata) != {"name", "version"}:
+        raise ValueError(f"{env_var} must contain exactly 'name' and 'version'")
+    if not all(isinstance(metadata[key], str) and metadata[key] for key in metadata):
+        raise ValueError(f"{env_var} name and version must be non-empty strings")
+    return metadata
+
+
+# Note (wenyao): mirrors aggregate_power_multinode.ROLE_METRIC_KEYS as literals
+# so the internal-error fallback still scrubs role metrics when that module is
+# the thing that failed to import.
+_MULTINODE_ROLE_METRIC_KEYS = (
+    "prefill_gpu_energy_j",
+    "decode_gpu_energy_j",
+    "prefill_avg_power_w",
+    "decode_avg_power_w",
+    "prefill_joules_per_input_token",
+    "decode_joules_per_output_token",
+)
+
+
+def record_power_internal_error(
+    *,
+    csv_path,
+    bench_result,
+    agg_result,
+    validation_result,
+    expected_num_gpus,
+    error,
+):
+    """Preserve an auditable invalid result when aggregation fails unexpectedly."""
+    reasons = ["aggregation_internal_error"]
+    try:
+        from aggregate_power import (
+            _POWER_METRIC_KEYS,
+            POWER_METRIC_SCHEMA_VERSION,
+            _empty_integration,
+            _validation_payload,
+            _write_json_atomic,
+        )
+
+        agg_data = json.loads(agg_result.read_text(encoding="utf-8"))
+        for key in _POWER_METRIC_KEYS:
+            agg_data.pop(key, None)
+        for key in _MULTINODE_ROLE_METRIC_KEYS:
+            agg_data.pop(key, None)
+        agg_data["power_metric_schema_version"] = POWER_METRIC_SCHEMA_VERSION
+        agg_data["power_valid"] = 0
+        agg_data.pop("power_invalid_reasons", None)
+        _write_json_atomic(agg_result, agg_data)
+
+        validation_data = _validation_payload(
+            csv_path=csv_path,
+            bench_result=bench_result,
+            benchmark=None,
+            integration=_empty_integration(
+                expected_num_gpus=expected_num_gpus,
+                reasons=reasons,
+            ),
+            power_valid=False,
+            reasons=reasons,
+            metrics={},
+            accumulator_check=None,
+        )
+        validation_data["internal_error"] = {
+            "type": type(error).__name__,
+            "message": str(error)[:500],
+        }
+        _write_json_atomic(validation_result, validation_data)
+    except (OSError, json.JSONDecodeError, ImportError, AttributeError) as fallback_error:
+        print(
+            f"[process_result] failed to preserve power validation fallback: "
+            f"{fallback_error}",
+            file=sys.stderr,
+        )
+
+
 # Base required env vars
 base_env = get_required_env_vars([
     'RUNNER_TYPE', 'FRAMEWORK', 'PRECISION', 'SPEC_DECODING',
@@ -38,10 +125,10 @@ result_filename = base_env['RESULT_FILENAME']
 isl = base_env['ISL']
 osl = base_env['OSL']
 image = base_env['IMAGE']
+recipe_fingerprint = os.environ.get('RECIPE_FINGERPRINT', '')
 
 with open(f'{result_filename}.json') as f:
     bmk_result = json.load(f)
-
 total_token_throughput = float(bmk_result['total_token_throughput'])
 output_throughput = float(bmk_result['output_throughput'])
 if total_token_throughput <= 0 or output_throughput <= 0:
@@ -60,15 +147,20 @@ data = {
     'precision': precision,
     'spec_decoding': spec_decoding,
     'disagg': disagg,
+    'recipe_fingerprint': recipe_fingerprint,
     'isl': int(isl),
     'osl': int(osl),
 }
 
-# --- Normalize throughput per *physical chip* ---------------------------------------
-# TP / PREFILL_GPUS / DECODE_GPUS count *logical* devices. vLLM/JAX exposes each TPU v7
-# (Ironwood) chip as 2 logical devices ("cores"); GPUs and other accelerators are 1:1.
-# Dividing by physical chips keeps tok/s/chip comparable across TPU and GPU and consistent
-# with per-chip $/TCO (you buy whole chips, not cores).
+router = get_optional_component_metadata('ROUTER_METADATA')
+if router is not None:
+    data['router'] = router
+
+kv_p2p_transfer = os.environ.get('KV_P2P_TRANSFER')
+if kv_p2p_transfer:
+    data['kv_p2p_transfer'] = kv_p2p_transfer
+# TP and the multinode GPU counts represent logical devices. vLLM/JAX exposes
+# each TPU v7 (Ironwood) chip as two logical devices; other accelerators are 1:1.
 LOGICAL_DEVICES_PER_CHIP = {'tpuv7': 2}
 chip_divisor = LOGICAL_DEVICES_PER_CHIP.get(hw, 1)
 
@@ -92,12 +184,30 @@ if is_multinode:
     decode_gpus = int(multinode_env['DECODE_GPUS'])
     prefill_num_workers = int(multinode_env['PREFILL_NUM_WORKERS'])
     prefill_tp = int(multinode_env['PREFILL_TP'])
+    prefill_pp = int(os.environ.get('PREFILL_PP_SIZE', '1'))
+    prefill_dcp_size = int(os.environ.get('PREFILL_DCP_SIZE', '1'))
+    prefill_pcp_size = int(os.environ.get('PREFILL_PCP_SIZE', '1'))
     prefill_ep = int(multinode_env['PREFILL_EP'])
     prefill_dp_attn = multinode_env['PREFILL_DP_ATTN']
     decode_num_workers = int(multinode_env['DECODE_NUM_WORKERS'])
     decode_tp = int(multinode_env['DECODE_TP'])
+    decode_pp = int(os.environ.get('DECODE_PP_SIZE', '1'))
+    decode_dcp_size = int(os.environ.get('DECODE_DCP_SIZE', '1'))
+    decode_pcp_size = int(os.environ.get('DECODE_PCP_SIZE', '1'))
     decode_ep = int(multinode_env['DECODE_EP'])
     decode_dp_attn = multinode_env['DECODE_DP_ATTN']
+    worker_parallelism = (
+        prefill_pp,
+        prefill_dcp_size,
+        prefill_pcp_size,
+        decode_pp,
+        decode_dcp_size,
+        decode_pcp_size,
+    )
+    if any(value <= 0 for value in worker_parallelism):
+        raise ValueError(
+            "Multinode PP, DCP, and PCP sizes must be positive integers."
+        )
 
     total_gpus = prefill_gpus + decode_gpus
     if total_gpus <= 0:
@@ -108,14 +218,23 @@ if is_multinode:
     output_tput_denominator = decode_gpus if decode_gpus > 0 else total_gpus
     output_decode_tp = decode_tp if decode_gpus > 0 else 0
     output_decode_ep = decode_ep if decode_gpus > 0 else 0
+    output_decode_pp = decode_pp if decode_gpus > 0 else 1
+    output_decode_dcp_size = decode_dcp_size if decode_gpus > 0 else 1
+    output_decode_pcp_size = decode_pcp_size if decode_gpus > 0 else 1
 
     multi_node_data = {
         'is_multinode': True,
         'prefill_tp': prefill_tp,
+        'prefill_pp': prefill_pp,
+        'prefill_dcp_size': prefill_dcp_size,
+        'prefill_pcp_size': prefill_pcp_size,
         'prefill_ep': prefill_ep,
         'prefill_dp_attention': prefill_dp_attn,
         'prefill_num_workers': prefill_num_workers,
         'decode_tp': output_decode_tp,
+        'decode_pp': output_decode_pp,
+        'decode_dcp_size': output_decode_dcp_size,
+        'decode_pcp_size': output_decode_pcp_size,
         'decode_ep': output_decode_ep,
         'decode_dp_attention': decode_dp_attn,
         'decode_num_workers': decode_num_workers,
@@ -141,13 +260,21 @@ else:
         raise ValueError("DP must be a positive integer.")
     ep_size = int(single_node_env['EP_SIZE'])
     dp_attention = single_node_env['DP_ATTENTION']
-    logical_devices = tp_size * dp_size
+    pp = int(os.environ.get('PP_SIZE', '1'))
+    dcp_size = int(os.environ.get('DCP_SIZE', '1'))
+    pcp_size = int(os.environ.get('PCP_SIZE', '1'))
+    if pp <= 0 or dcp_size <= 0 or pcp_size <= 0:
+        raise ValueError("PP_SIZE, DCP_SIZE, and PCP_SIZE must be positive integers.")
+    logical_devices = tp_size * pp * pcp_size * dp_size
     num_gpus = max(1, (logical_devices + chip_divisor - 1) // chip_divisor)
 
     single_node_data = {
         'is_multinode': False,
         'tp': tp_size,
         'dp': dp_size,
+        'pp': pp,
+        'dcp_size': dcp_size,
+        'pcp_size': pcp_size,
         'ep': ep_size,
         'dp_attention': dp_attention,
         'num_gpus': num_gpus,
@@ -166,16 +293,46 @@ for key, value in bmk_result.items():
         data[key.replace('_ms', '').replace(
             'tpot', 'intvty')] = 1000.0 / tpot_ms if tpot_ms else 0.0
 
-print(json.dumps(data, indent=2))
-
 agg_path = Path(f'agg_{result_filename}.json')
 with open(agg_path, 'w') as f:
     json.dump(data, f, indent=2)
 
-# Best-effort: patch measured power into the agg JSON. Never fails the run.
-try:
-    from aggregate_power import run as _aggregate_power_run
+# Measured power is best-effort by default. Power studies can set
+# REQUIRE_POWER=1 to fail closed after the validation sidecar has been written.
+_require_power = os.environ.get('REQUIRE_POWER', '').lower() in {'1', 'true', 'yes'}
+_power_status = 0
+if is_multinode:
+    _power_dir = Path(os.environ.get('POWER_ARTIFACT_DIR', 'LOGS/power'))
+    _logs_root = Path(os.environ.get('POWER_RESULT_ROOT', 'LOGS'))
+    _bench_path = Path(f'{result_filename}.json')
+    _validation_path = Path(f'power_validation_{result_filename}.json')
+    try:
+        from aggregate_power_multinode import run as _aggregate_power_multinode_run
 
+        _power_status = _aggregate_power_multinode_run(
+            _power_dir,
+            _bench_path,
+            agg_path,
+            prefill_gpus=prefill_gpus,
+            decode_gpus=decode_gpus,
+            expected_producer_sha=os.environ.get('POWER_PRODUCER_SHA') or None,
+            logs_root=_logs_root,
+            validation_result=_validation_path,
+            require_power=_require_power,
+        )
+    except Exception as exc:  # noqa: BLE001 — preserve ordinary benchmark behavior
+        print(f'[process_result] power aggregation failed: {exc}', file=sys.stderr)
+        record_power_internal_error(
+            csv_path=_power_dir,
+            bench_result=_bench_path,
+            agg_result=agg_path,
+            validation_result=_validation_path,
+            expected_num_gpus=prefill_gpus + decode_gpus,
+            error=exc,
+        )
+        if _require_power:
+            _power_status = 1
+else:
     _csv_candidates = [
         os.environ.get('GPU_METRICS_CSV'),
         'gpu_metrics.csv',
@@ -183,13 +340,36 @@ try:
     ]
     _csv_path = next(
         (Path(p) for p in _csv_candidates if p and Path(p).is_file()),
-        None,
+        Path(next(p for p in _csv_candidates if p)),
     )
-    if _csv_path is not None:
-        _aggregate_power_run(
+    _bench_path = Path(f'{result_filename}.json')
+    _validation_path = Path(f'power_validation_{result_filename}.json')
+    try:
+        from aggregate_power import run as _aggregate_power_run
+
+        _power_status = _aggregate_power_run(
             csv_path=_csv_path,
-            bench_result=Path(f'{result_filename}.json'),
+            bench_result=_bench_path,
             agg_result=agg_path,
+            expected_num_gpus=num_gpus,
+            validation_result=_validation_path,
+            require_power=_require_power,
         )
-except Exception as exc:  # noqa: BLE001 — never block on telemetry
-    print(f'[process_result] power aggregation skipped: {exc}', file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — preserve ordinary benchmark behavior
+        print(f'[process_result] power aggregation failed: {exc}', file=sys.stderr)
+        record_power_internal_error(
+            csv_path=_csv_path,
+            bench_result=_bench_path,
+            agg_result=agg_path,
+            validation_result=_validation_path,
+            expected_num_gpus=num_gpus,
+            error=exc,
+        )
+        if _require_power:
+            _power_status = 1
+
+with open(agg_path) as f:
+    print(json.dumps(json.load(f), indent=2))
+
+if _power_status:
+    raise SystemExit(_power_status)

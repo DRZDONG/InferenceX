@@ -11,8 +11,8 @@ name: Runner Offline Digest
 #                      of channel C09PULGMVNG.
 
 on:
-  #schedule:
-    #- cron: '13 14 * * *'  # daily 14:13 UTC ≈ 8:13 AM CST (9:13 AM CDT during DST)
+  schedule:
+    - cron: '13 14 * * *'  # daily 14:13 UTC ≈ 8:13 AM CST (9:13 AM CDT during DST)
   workflow_dispatch:
 
 permissions:

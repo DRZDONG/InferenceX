@@ -9,7 +9,7 @@ Find open PRs authored by Claude (branches starting with `claude/`) whose full-s
 `gh pr list --json statusCheckRollup` truncates each PR's rollup, so it can't be trusted for the per-check filter. Use it only to get the candidate numbers, then re-query each PR individually.
 
 ```bash
-gh pr list --repo SemiAnalysisAI/InferenceX-Private-TPU --state open --limit 200 \
+gh pr list --repo SemiAnalysisAI/InferenceX --state open --limit 200 \
   --json number,title,headRefName \
   --jq '.[] | select(.headRefName | startswith("claude/")) | .number' \
   > /tmp/claude_pr_candidates.txt
@@ -21,14 +21,14 @@ For each candidate, fetch the full rollup with `gh pr view`. A PR qualifies only
 
 - No check has conclusion `FAILURE`, `CANCELLED`, or `TIMED_OUT`
 - No check has status `QUEUED`, `IN_PROGRESS`, or `PENDING` (sweep finished, not still running)
-- At least one `Run Sweep` check has conclusion `SUCCESS` (sweep actually ran — not all skipped)
+- At least one `Run Sweep` check has conclusion `SUCCESS` (sweep actually ran, rather than all checks being skipped)
 
 Note: `gh` returns `conclusion: ""` (empty string, not `null`) for in-flight checks, so jq's `//` operator does **not** fall through to `.status`. Each check's effective state must be computed as `if conclusion is non-empty then conclusion else status`.
 
 ```bash
 : > /tmp/claude_prs_green.txt
 while read -r pr; do
-  is_green=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX-Private-TPU --json statusCheckRollup --jq '
+  is_green=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX --json statusCheckRollup --jq '
     def state: if (.conclusion // "") != "" then .conclusion else .status end;
     . as $p
     | ([$p.statusCheckRollup[] | state]) as $s
@@ -36,8 +36,8 @@ while read -r pr; do
     | ([$p.statusCheckRollup[] | select(.workflowName == "Run Sweep" and (state) == "SUCCESS")] | length > 0) as $swept
     | (($bad | not) and $swept)')
   if [ "$is_green" = "true" ]; then
-    title=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX-Private-TPU --json title --jq '.title')
-    printf '%s\thttps://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/%s\t%s\n' "$pr" "$pr" "$title" >> /tmp/claude_prs_green.txt
+    title=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX --json title --jq '.title')
+    printf '%s\thttps://github.com/SemiAnalysisAI/InferenceX/pull/%s\t%s\n' "$pr" "$pr" "$title" >> /tmp/claude_prs_green.txt
   fi
 done < /tmp/claude_pr_candidates.txt
 cat /tmp/claude_prs_green.txt

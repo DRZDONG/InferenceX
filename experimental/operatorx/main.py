@@ -272,7 +272,7 @@ def main() -> int:
         write_run_result(out_path, run, results)
         print(f"\n[run_smoke] {counts} -> {out_path}")
 
-    # Multi-rank cleanup (torch.distributed is used by NVIDIA)
+    # Multi-rank cleanup (torch.distributed used by NVIDIA + Trainium)
     if ws > 1:
         try:
             import torch.distributed as dist

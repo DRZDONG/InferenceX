@@ -36,6 +36,11 @@ on:
       exp-name:
         required: true
         type: string
+      recipe-fingerprint:
+        description: "Deterministic generated-recipe identity"
+        required: false
+        type: string
+        default: ''
       isl:
         required: true
         type: string
@@ -137,6 +142,11 @@ on:
         required: false
         type: string
         default: '3600'
+      require-power:
+        description: "Fail result processing when GPU power is invalid"
+        required: false
+        type: boolean
+        default: false
       agentx-fast:
         description: "Use one warmup request per AgentX lane and a 20-minute profile"
         required: false
@@ -157,6 +167,7 @@ env:
   HF_TOKEN: ${{ secrets.INFERENCEX_OFFICIAL_RO_HF_TOKEN }}
   HF_HUB_CACHE: '/mnt/hf_hub_cache/'
   EXP_NAME: ${{ inputs.exp-name }}
+  RECIPE_FINGERPRINT: ${{ inputs.recipe-fingerprint }}
   MODEL: ${{ inputs.model }}
   MODEL_PREFIX: ${{ inputs.model-prefix }}
   ISL: ${{ inputs.isl }}
@@ -188,6 +199,7 @@ env:
   KV_P2P_TRANSFER: ${{ inputs.kv-p2p-transfer }}
   TOTAL_CPU_DRAM_GB: ${{ inputs.total-cpu-dram-gb }}
   DURATION: ${{ inputs.duration }}
+  REQUIRE_POWER: ${{ inputs.require-power && '1' || '0' }}
   AIPERF_EXPERIMENTAL_FAST: ${{ inputs.agentx-fast && '1' || '0' }}
   EVAL_LIMIT: ${{ inputs.eval-limit }}
   SWEBENCH_GEN_MODE: ${{ inputs.swebench-gen-mode }}
@@ -275,17 +287,20 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RUNNER_NAME: ${{ runner.name }}
           RUNNER_TYPE: ${{ inputs.runner }}
-          # Hash uniquely on {EXP_NAME}_{PRECISION}_{FRAMEWORK}_tp{}-pp{}-dcp{}-pcp{}-ep{}-dpa{}_disagg-{}_spec-{}_conc{}_{runner}
-          RESULT_FILENAME: ${{ env.EXP_NAME }}_${{ env.PRECISION }}_${{ env.FRAMEWORK }}_tp${{ env.TP }}-pp${{ env.PP_SIZE }}-dcp${{ env.DCP_SIZE }}-pcp${{ env.PCP_SIZE }}-ep${{ env.EP_SIZE }}-dpa${{ env.DP_ATTENTION }}_disagg-${{ env.DISAGG }}_spec-${{ env.SPEC_DECODING }}_conc${{ env.CONC }}_${{ runner.name }}
+          RESULT_FILENAME_BASE: ${{ env.EXP_NAME }}_${{ env.PRECISION }}_${{ env.FRAMEWORK }}_tp${{ env.TP }}-pp${{ env.PP_SIZE }}-dcp${{ env.DCP_SIZE }}-pcp${{ env.PCP_SIZE }}-ep${{ env.EP_SIZE }}-dpa${{ env.DP_ATTENTION }}_disagg-${{ env.DISAGG }}_spec-${{ env.SPEC_DECODING }}_conc${{ env.CONC }}_${{ runner.name }}
           # Suppress per-job eval markdown from being appended to the step summary.
           # We'll publish a single combined eval table in the collection job instead.
           GITHUB_STEP_SUMMARY: ''
         run: |
+          export RESULT_FILENAME="$RESULT_FILENAME_BASE"
+          if [ -n "$RECIPE_FINGERPRINT" ]; then
+            export RESULT_FILENAME="${RESULT_FILENAME}_recipe-${RECIPE_FINGERPRINT:0:16}"
+          fi
           export GPU_COUNT=$((TP * PP_SIZE * PCP_SIZE))
           echo "GPU_COUNT=${GPU_COUNT}" >> "$GITHUB_ENV"
 
           # Export RESULT_FILENAME early so it's available for artifact uploads even if cancelled
-          echo "RESULT_FILENAME=${RESULT_FILENAME}" >> $GITHUB_ENV
+          echo "RESULT_FILENAME=${RESULT_FILENAME}" >> "$GITHUB_ENV"
 
           ADDITIONAL_SETTINGS_ARGS="${{ join(fromJson(inputs.additional-settings), ' ') }}"
           if [ -n "$ADDITIONAL_SETTINGS_ARGS" ]; then
@@ -392,7 +407,26 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.eval-only && 'eval_gpu_metrics_' || 'gpu_metrics_' }}${{ env.RESULT_FILENAME }}
-          path: gpu_metrics.csv
+          path: |
+            gpu_metrics.csv
+            gpu_metrics_energy_start.csv
+            gpu_metrics_energy_end.csv
+            gpu_metrics_identity.json
+          if-no-files-found: ignore
+
+      - name: Upload power audit bundle
+        if: ${{ always() && !inputs.eval-only && inputs.scenario-type != 'agentic-coding' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: power_audit_${{ env.RESULT_FILENAME }}
+          path: |
+            ${{ env.RESULT_FILENAME }}.json
+            agg_${{ env.RESULT_FILENAME }}.json
+            gpu_metrics.csv
+            gpu_metrics_energy_start.csv
+            gpu_metrics_energy_end.csv
+            gpu_metrics_identity.json
+            power_validation_${{ env.RESULT_FILENAME }}.json
           if-no-files-found: ignore
 
       - name: Upload eval results (if any)

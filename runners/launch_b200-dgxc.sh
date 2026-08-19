@@ -1,18 +1,16 @@
 #!/usr/bin/bash
 
 # System-specific configuration for B200 DGXC Slurm cluster
-SLURM_PARTITION="gpu-2"
-SLURM_ACCOUNT="benchmark"
+SLURM_PARTITION="${SLURM_PARTITION:-gpu-2}"
+SLURM_ACCOUNT="${SLURM_ACCOUNT:-benchmark}"
 
 set -x
 
-# MODEL_PATH: Override with pre-downloaded paths on the shared Lustre tree.
+# MODEL_PATH: Override with pre-downloaded paths on cluster-accessible storage.
 # Bench scripts and srt-slurm yaml configs specify HuggingFace model IDs for
-# portability, but we resolve to /lustre/fsw/models/* here to avoid repeated
+# portability, but we resolve to pre-staged paths here to avoid repeated
 # downloading on every dgxc node. Runs for both single-node and multinode
 # launches.
-# NOTE: per-node /raid/models/* would be faster but is only populated on a
-# subset of dgxc nodes today, so we use Lustre for reliability.
 if [[ $MODEL_PREFIX == "dsr1" && $PRECISION == "fp4" ]]; then
     export MODEL_PATH="/scratch/fsw/models/DeepSeek-R1-0528-NVFP4-v2"
     export SRT_SLURM_MODEL_PREFIX="dsr1"
@@ -39,21 +37,67 @@ elif [[ $MODEL_PREFIX == "qwen3.5" && $PRECISION == "bf16" ]]; then
 elif [[ $MODEL_PREFIX == "qwen3.5" && $PRECISION == "fp8" ]]; then
     export MODEL_PATH="/lustre/fsw/models/Qwen3.5-397B-A17B-FP8"
     export SRT_SLURM_MODEL_PREFIX="qwen3.5-fp8"
+# qwen3.5 fp4 spans two checkpoints, so this must branch on the checkpoint and
+# not on MODEL_PREFIX+PRECISION alone: the sglang keys moved to NVFP4-V2 while
+# qwen3.5-fp4-b200-trt / -trt-mtp still declare plain NVFP4. Both share
+# model-prefix qwen3.5 + precision fp4 + runner b200, and further down this
+# script does `export MODEL="$MODEL_PATH"`, so a single shared branch would
+# serve V2 weights to the TRT configs while publishing them under the old
+# checkpoint name.
+elif [[ $MODEL_PREFIX == "qwen3.5" && $PRECISION == "fp4" && $MODEL == *NVFP4-V2 ]]; then
+    export MODEL_PATH="/scratch/fsw/models/Qwen3.5-397B-A17B-NVFP4-V2"
+    export SRT_SLURM_MODEL_PREFIX="qwen3.5-fp4"
 elif [[ $MODEL_PREFIX == "qwen3.5" && $PRECISION == "fp4" ]]; then
     export MODEL_PATH="/lustre/fsw/models/Qwen3.5-397B-A17B-NVFP4"
     export SRT_SLURM_MODEL_PREFIX="qwen3.5-fp4"
 elif [[ $MODEL_PREFIX == "glm5" && $PRECISION == "fp8" ]]; then
     export MODEL_PATH="/lustre/fsw/models/GLM-5-FP8"
     export SRT_SLURM_MODEL_PREFIX="glm5-fp8"
+elif [[ $MODEL_PREFIX == "glm5.1" && $PRECISION == "fp8" ]]; then
+    # GLM-5.1 retired in July and its weights were cleaned out of the
+    # SRE-owned (root-only) /lustre/fsw/models tree, so this checkpoint is
+    # staged on the sa-shared-writable home Lustre mount instead. That mount
+    # is compute-visible at the same path, and the launcher bind-mounts
+    # $MODEL_PATH by name into the container.
+    export MODEL_PATH="/home/sa-shared/models/GLM-5.1-FP8"
+    export SRT_SLURM_MODEL_PREFIX="glm5.1-fp8"
 elif [[ $MODEL_PREFIX == "glm5" && $PRECISION == "fp4" ]]; then
     export MODEL_PATH="/lustre/fsw/models/GLM-5-NVFP4"
     export SRT_SLURM_MODEL_PREFIX="glm5-fp4"
+elif [[ $MODEL_PREFIX == "glm5.2" && $PRECISION == "fp4" ]]; then
+    # Day-zero on b200-dgxc: GLM-5.2-NVFP4 may not be in the SRE-staged trees
+    # yet. Probe them first (same shape as the dsv4 branch above), then fall
+    # back to the sa-shared-writable gharunners tree, which the bench script's
+    # `hf download` guard populates on first use. The fallback dir is created
+    # here because --container-mounts needs the host path to exist.
+    #
+    # A candidate must hold at least one weight shard, not merely exist. The
+    # gharunners path was already there in run 30729467646 holding config.json
+    # and five other metadata files and no weights at all, and a bare -d test
+    # would pick such a stub over a real copy in another tree.
+    SELECTED_MODEL_PATH=""
+    if [[ -n "${MODEL_PATH:-}" && -d "${MODEL_PATH}" ]]; then
+        SELECTED_MODEL_PATH="$MODEL_PATH"
+    else
+        for candidate in /lustre/fsw/models/GLM-5.2-NVFP4 /scratch/fsw/models/GLM-5.2-NVFP4 /lustre/fsw/gharunners/models/GLM-5.2-NVFP4; do
+            if [[ -d "$candidate" ]] && ls "$candidate"/*.safetensors >/dev/null 2>&1; then
+                SELECTED_MODEL_PATH="$candidate"
+                break
+            fi
+        done
+    fi
+    export MODEL_PATH="${SELECTED_MODEL_PATH:-/lustre/fsw/gharunners/models/GLM-5.2-NVFP4}"
+    mkdir -p "$MODEL_PATH"
+    export SRT_SLURM_MODEL_PREFIX="glm5.2-fp4"
 elif [[ $MODEL_PREFIX == "kimik2.5" && $PRECISION == "int4" ]]; then
     export MODEL_PATH="/lustre/fsw/models/Kimi-K2.5"
     export SRT_SLURM_MODEL_PREFIX="kimik2.5"
 elif [[ $MODEL_PREFIX == "kimik2.5" && $PRECISION == "fp4" ]]; then
     export MODEL_PATH="/lustre/fsw/models/Kimi-K2.5-NVFP4"
     export SRT_SLURM_MODEL_PREFIX="kimik2.5-fp4"
+elif [[ $MODEL_PREFIX == "kimik2.6" && $PRECISION == "fp4" ]]; then
+    export MODEL_PATH="${MODEL_PATH:-/lustre/fsw/models/Kimi-K2.6-NVFP4}"
+    export SRT_SLURM_MODEL_PREFIX="kimi-k2.6-nvfp4"
 elif [[ $MODEL_PREFIX == "minimaxm2.5" && $PRECISION == "fp8" ]]; then
     export MODEL_PATH="/lustre/fsw/models/MiniMax-M2.5"
     export SRT_SLURM_MODEL_PREFIX="minimax-m2.5-fp8"
@@ -85,6 +129,21 @@ fi
 export AIPERF_MMAP_CACHE_HOST_PATH="/lustre/fsw/gharunners/aiperf-cache"
 
 if [[ "$IS_MULTINODE" == "true" ]]; then
+    if [[ "$FRAMEWORK" == "tilert" ]]; then
+        export SLURM_PARTITION SLURM_ACCOUNT
+        export TILERT_WEIGHTS_DIR="${TILERT_WEIGHTS_DIR:-/lustre/fsw/gharunners/models/${MODEL_PREFIX}-${PRECISION}-tilert-8shard}"
+        # These nodes expose eight RoCE HCAs, mlx5_0..mlx5_7 (all PORT_ACTIVE,
+        # link_layer Ethernet); there is no mlx5_10/mlx5_11 here. Verified
+        # with ibv_devinfo inside a pyxis container on an allocated gpu-2 node.
+        export UCX_NET_DEVICES="${UCX_NET_DEVICES:-mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1}"
+        export UCX_MEMTYPE_CACHE="${UCX_MEMTYPE_CACHE:-n}"
+        export UCX_MEMTYPE_REG_WHOLE="${UCX_MEMTYPE_REG_WHOLE:-n}"
+        TILERT_DISAGG="$GITHUB_WORKSPACE/benchmarks/multi_node/${EXP_NAME%%_*}_${PRECISION}_b200_${FRAMEWORK}-disagg.sh"
+        [[ -f "$TILERT_DISAGG" ]] || { echo "tilert disagg script not found: $TILERT_DISAGG"; exit 1; }
+        exec bash "$TILERT_DISAGG"
+        exit 1
+    fi
+
     # Validate framework
     if [[ $FRAMEWORK != "dynamo-sglang" && $FRAMEWORK != "dynamo-trt" && $FRAMEWORK != "dynamo-vllm" ]]; then
         echo "Unsupported framework: $FRAMEWORK. Supported frameworks are: dynamo-trt, dynamo-sglang, dynamo-vllm"
@@ -106,27 +165,28 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
         rm -rf "$SRT_REPO_DIR"
     fi
 
-    # TODO(CJQ): make first class upon srt-slurm upstream refactor
+    # Kimi K3 aggregate profiles use the srt-slurm fork that supports direct
+    # multi-node vLLM. Pin the tested renderer so branch movement cannot change
+    # generated rank commands between sweep points.
     if [[ "$IS_AGENTIC" == "1" && $MODEL_PREFIX == "kimik3" ]]; then
-        # Direct-vLLM agentic experiment (Variant D): srt-slurm PR #278
-        # (kylliang/direct-aggregate-vllm) adds frontend.type: vllm — `vllm
-        # serve` owns the OpenAI port itself, no Dynamo layer. The fork branch
-        # carries PR #278 plus the multi-node extension (vLLM-native
-        # --master-addr/--nnodes/--node-rank serve + headless non-leader
-        # ranks) so the 2-node TP8xPP2 topology can run.
         git clone --branch klaud/direct-vllm-multinode --single-branch https://github.com/functionstackx/srt-slurm-nv.git "$SRT_REPO_DIR" || exit 1
         cd "$SRT_REPO_DIR" || exit 1
-        if [[ $MODEL_PREFIX == "kimik3" ]]; then
-            mkdir -p recipes/vllm/kimi-k3/agentic || exit 1
-            cp -rT "$GITHUB_WORKSPACE/benchmarks/multi_node/srt-slurm-recipes/vllm/kimi-k3/agentic" \
-                recipes/vllm/kimi-k3/agentic || exit 1
-        fi
+        git checkout df5baa93f4caf5169dea2a4236ad2cc742fe40e7 || exit 1
+        mkdir -p recipes/vllm/kimi-k3/agentic || exit 1
+        cp -rT "$GITHUB_WORKSPACE/benchmarks/multi_node/srt-slurm-recipes/vllm/kimi-k3/agentic" \
+            recipes/vllm/kimi-k3/agentic || exit 1
     elif [[ $FRAMEWORK == "dynamo-vllm" && $MODEL_PREFIX == "dsv4" ]]; then
         git clone https://github.com/NVIDIA/srt-slurm.git "$SRT_REPO_DIR"
         cd "$SRT_REPO_DIR" || exit 1
         git checkout aflowers/vllm-gb200-v0.20.0
         mkdir -p recipes/vllm/deepseek-v4
         cp -rT "$GITHUB_WORKSPACE/benchmarks/multi_node/srt-slurm-recipes/vllm/deepseek-v4" recipes/vllm/deepseek-v4
+    elif [[ $FRAMEWORK == "dynamo-vllm" && $MODEL_PREFIX == "kimik2.6" && $PRECISION == "fp4" ]]; then
+        git clone --branch main --single-branch https://github.com/NVIDIA/srt-slurm.git "$SRT_REPO_DIR"
+        cd "$SRT_REPO_DIR" || exit 1
+        git checkout c180328b98c3793ca84a1e24a030f90545eb7d5d || exit 1
+        mkdir -p recipes/vllm/kimi-k2.6
+        cp -rT "$GITHUB_WORKSPACE/benchmarks/multi_node/srt-slurm-recipes/vllm/kimi-k2.6" recipes/vllm/kimi-k2.6
     elif [[ $FRAMEWORK == "dynamo-vllm" && $MODEL_PREFIX == "minimaxm3" && $PRECISION == "fp4" ]]; then
         git clone https://github.com/NVIDIA/srt-slurm.git "$SRT_REPO_DIR"
         cd "$SRT_REPO_DIR" || exit 1
@@ -141,7 +201,12 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
     elif [[ $FRAMEWORK == "dynamo-sglang" && $MODEL_PREFIX == "dsr1" && $PRECISION == "fp4" ]]; then
         git clone https://github.com/NVIDIA/srt-slurm.git "$SRT_REPO_DIR"
         cd "$SRT_REPO_DIR" || exit 1
-        git checkout main
+        # Pin srt-slurm: newer commits stopped honoring the hash-pinned dynamo
+        # build and fall back to a dynamo release that is incompatible with this
+        # sglang image (worker fails at import). This is the last commit before
+        # that change. Do not float on main -- the srtctl + dynamo-install
+        # toolchain is unpinned there.
+        git checkout a98738de9b2233459b5456e9ed71af09ce893f92
         mkdir -p recipes/sglang/dsr1/b200-fp4
         cp -rT "$GITHUB_WORKSPACE/benchmarks/multi_node/srt-slurm-recipes/sglang/dsr1/b200-fp4" recipes/sglang/dsr1/b200-fp4
     elif [[ $FRAMEWORK == "dynamo-trt" && $MODEL_PREFIX == "kimik2.5" && $PRECISION == "fp4" ]]; then
@@ -201,7 +266,7 @@ if [[ "$IS_MULTINODE" == "true" ]]; then
         local lock_file="${lock_dir}/${image_key}.lock"
 
         (
-            flock -w 600 9 || { echo "Failed to acquire lock for $squash_file" >&2; exit 1; }
+            flock -w "${B200_SQUASH_LOCK_TIMEOUT:-600}" 9 || { echo "Failed to acquire lock for $squash_file" >&2; exit 1; }
             if unsquashfs -l "$squash_file" > /dev/null 2>&1; then
                 echo "Squash file already exists and is valid, skipping import: $squash_file"
             else
@@ -282,6 +347,15 @@ EOF
     echo "MODEL_PATH=$MODEL_PATH (exists=$(test -d "$MODEL_PATH" && echo yes || echo NO))"
     ls -ld "$MODEL_PATH" 2>&1 || ls /lustre/fsw/models/ 2>&1 | head -40
 
+    # An eval row may point at a committed real-verification recipe while its
+    # throughput row keeps synthetic golden acceptance. Only configs that set
+    # EVAL_CONFIG_FILE opt into this selection; all other configs keep using
+    # CONFIG_FILE unchanged.
+    if [[ "${EVAL_ONLY:-false}" == "true" && -n "${EVAL_CONFIG_FILE:-}" ]]; then
+        CONFIG_FILE="$EVAL_CONFIG_FILE"
+        echo "EVAL_ONLY=true: selecting real-verification recipe $CONFIG_FILE"
+    fi
+
     if [[ -z "$CONFIG_FILE" ]]; then
         echo "Error: CONFIG_FILE is not set. The srt-slurm path requires a CONFIG_FILE in additional-settings." >&2
         echo "Config: MODEL_PREFIX=${MODEL_PREFIX} PRECISION=${PRECISION} FRAMEWORK=${FRAMEWORK}" >&2
@@ -294,7 +368,14 @@ EOF
     # so large-model loads (e.g. DSR1-FP8 ~680GB off shared FS) finish in time.
     # Uses ${CONFIG_FILE%%:*} because CONFIG_FILE may carry an :override[N] suffix.
     sed -i 's/^  max_attempts: [0-9]*/  max_attempts: 720/' "${CONFIG_FILE%%:*}"
-    SRTCTL_OUTPUT=$(srtctl apply -f "$CONFIG_FILE" --tags "b200,${MODEL_PREFIX},${PRECISION},${ISL}x${OSL},infmax-$(date +%Y%m%d)" 2>&1)
+
+    SRTCTL_PREFLIGHT_ARGS=()
+    # Kimi K2.6 weights are staged on the Slurm compute nodes, not the login node.
+    if [[ $FRAMEWORK == "dynamo-vllm" && $MODEL_PREFIX == "kimik2.6" && $PRECISION == "fp4" ]]; then
+        SRTCTL_PREFLIGHT_ARGS+=(--no-preflight)
+    fi
+
+    SRTCTL_OUTPUT=$(srtctl apply -f "$CONFIG_FILE" "${SRTCTL_PREFLIGHT_ARGS[@]}" --tags "b200,${MODEL_PREFIX},${PRECISION},${ISL}x${OSL},infmax-$(date +%Y%m%d)" 2>&1)
     echo "$SRTCTL_OUTPUT"
 
     # Extract JOB_ID from srtctl output
@@ -432,10 +513,6 @@ EOF
 else
 
     SQUASH_FILE="/home/sa-shared/containers/$(echo "$IMAGE" | sed 's/[\/:@#]/_/g').sqsh"
-    # Point the bench script at the local MODEL_PATH resolved above instead of
-    # pulling from the HF hub cache. Bench scripts skip `hf download` when
-    # MODEL is a local path.
-    export MODEL="$MODEL_PATH"
     FRAMEWORK_SUFFIX=$([[ "$FRAMEWORK" == "trt" ]] && printf '_trt' || printf '')
     SPEC_SUFFIX=$([[ "$SPEC_DECODING" == "mtp" ]] && printf '_mtp' || printf '')
     # Prefer a framework-tagged script (e.g. dsv4_fp4_b200_vllm.sh) so models
@@ -463,27 +540,16 @@ else
     # and gpu-15 names no longer exist. gpu-2 currently has 10 fully-idle GPU
     # nodes (all of gpu-2-[0-9]); gpu-1 has 2 drained (gpu-1-4, gpu-1-8). We
     # land on gpu-2 to avoid drained nodes and skip the per-node excludes.
+    export GPU_COUNT="${GPU_COUNT:-${TP:?TP must be set}}"
+
     SALLOC_TIME_LIMIT="${SALLOC_TIME_LIMIT:-480}"
-    salloc --partition=$SLURM_PARTITION --account=$SLURM_ACCOUNT --gres=gpu:$TP --exclusive --mem=0 --time="$SALLOC_TIME_LIMIT" --no-shell --job-name="$RUNNER_NAME"
+    salloc --partition=$SLURM_PARTITION --account=$SLURM_ACCOUNT --gres=gpu:$GPU_COUNT --exclusive --mem=0 --time="$SALLOC_TIME_LIMIT" --no-shell --job-name="$RUNNER_NAME"
     JOB_ID=$(squeue --name="$RUNNER_NAME" -u "$USER" -h -o %A | head -n1)
 
-    # DSv4 is also staged on the compute nodes' local RAID. Loading the 806 GB
-    # checkpoint independently from Lustre on every TP rank leaves the loader
-    # threads blocked in Lustre I/O for hours. Select the local copy only after
-    # Slurm assigns a node, and retain the shared-Lustre path as a fallback for
-    # nodes whose local staging is incomplete.
-    if [[ "$MODEL_PREFIX" == "dsv4" && "$PRECISION" == "fp4" && "$FRAMEWORK" == "sglang" ]]; then
-        LOCAL_MODEL_PATH=/raid/models/DeepSeek-V4-Pro-NVFP4
-        if srun --jobid="$JOB_ID" bash -c \
-            'test -f "$1/config.json" && test -f "$1/model.safetensors.index.json" && test "$(find "$1" -maxdepth 1 -name "model-*.safetensors" | wc -l)" -eq 64' \
-            _ "$LOCAL_MODEL_PATH"; then
-            export MODEL_PATH="$LOCAL_MODEL_PATH"
-            export MODEL="$MODEL_PATH"
-            echo "Using node-local DSv4 checkpoint: $MODEL_PATH"
-        else
-            echo "Node-local DSv4 checkpoint unavailable; using shared checkpoint: $MODEL_PATH"
-        fi
-    fi
+    # Point the bench script at the resolved MODEL_PATH instead of
+    # pulling from the HF hub cache. Bench scripts skip `hf download` when
+    # MODEL is a local path.
+    export MODEL="$MODEL_PATH"
 
     # Use flock to serialize concurrent imports to the same squash file
     # Override ENROOT_CACHE_PATH to avoid permission issues with system-wide cache on worker nodes

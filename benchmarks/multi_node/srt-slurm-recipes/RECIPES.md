@@ -80,7 +80,7 @@ dsr1-fp8-h200-dynamo-sglang:
     - "Add DSR1 FP8 H200 Dynamo SGLang disaggregated multinode configuration"
     - "Image: lmsysorg/sglang:v0.5.8-cu130-runtime"
     - "Recipes sourced from srtslurm repo (recipes/h200/)"
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/XXX
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/XXX
 ```
 
 ## 7. Validate

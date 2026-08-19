@@ -1,7 +1,7 @@
 # operatorx
 
 Multi-platform inference operator benchmark suite. Times one op at a time
-(gemm, attention, moe, collectives, ...) on NVIDIA / AMD / TPU and
+(gemm, attention, moe, collectives, ...) on NVIDIA / AMD / TPU / Trainium and
 emits one JSON per run under `results/<platform>/<cluster>/`.
 
 See `CLUSTERS.md` for how to reach each cluster and the per-host quirks.
@@ -15,12 +15,13 @@ See `CLUSTERS.md` for how to reach each cluster and the per-host quirks.
 ### b200 (DGX-style, 8x B200 SXM)
 
 ```bash
-cd <repository>/experimental/operatorx
+ssh tailscale-b200
+cd /home/sa-shared/harrison/oss-inference-tracker/operatorx
 python3 scripts/submit_run.py nvidia
 ```
 
 Defaults that apply: `OPERATORX_CLUSTER=b200_dgx_8x`,
-with deployment-specific partition and container paths.
+`OPERATORX_PARTITION=gpu-2`, `OPERATORX_SQUASH_DIR=/home/sa-shared/containers`.
 
 ### b300 (HGX-style, 8x B300)
 
@@ -28,23 +29,25 @@ The b300 cluster needs a non-default partition + account + qos, has its own
 squash dir, and DeepEP has known IBGDA issues here so we exclude it.
 
 ```bash
-cd <repository>/experimental/operatorx
+ssh tailscale-b300
+cd /data/home/sa-shared/harrison/oss-inference-tracker/operatorx
 OPERATORX_CLUSTER=b300_hgx_8x \
-OPERATORX_PARTITION=<partition> \
-OPERATORX_ACCOUNT=<account> \
-OPERATORX_QOS=<qos> \
-OPERATORX_SQUASH_DIR=<squash-dir> \
+OPERATORX_PARTITION=batch_1 \
+OPERATORX_ACCOUNT=benchmark \
+OPERATORX_QOS=batch_1_qos \
+OPERATORX_SQUASH_DIR=/data/home/sa-shared/harrison/containers \
 OPERATORX_BACKENDS=torch,deepgemm,flashinfer,sglang \
 python3 scripts/submit_run.py nvidia
 ```
 
-### TPU
+### TPU / Trainium
 
-TPU hosts have no SLURM, so `submit_run.py` (which submits `sbatch` jobs)
-does not apply — run the benchmark directly on the VM:
+These hosts have no SLURM, so `submit_run.py` (which submits `sbatch` jobs)
+does not apply. Run the benchmark directly on the VM or instance:
 
 ```bash
-OPERATORX_CLUSTER=v6e_4x python -m operatorx
+OPERATORX_CLUSTER=v6e_4x   python -m operatorx   # TPU     (default tpu cluster)
+OPERATORX_CLUSTER=trn3_16x python -m operatorx   # Trainium (default trainium cluster)
 ```
 
 The TPU `maxtext` backend depends on Google's MaxText library. Install it
@@ -70,8 +73,8 @@ rather than running our old single-device dense fallback.
 | `OPERATORX_BACKENDS` | all backends for the platform | CSV allowlist. |
 | `OPERATORX_JOB_NAME` | `benchmark` | SLURM job name. Use `h-benchmark` for benchmark runs (see `CLUSTERS.md`). |
 
-`WORLD_SIZES` in the script is `[1, 2, 4, 8]` — single-node only (ws>8 is
-disabled: multi-node NCCL IB bring-up currently hangs on b200/b300).
+`WORLD_SIZES` in the script is `[1, 2, 4, 8]` and supports single-node runs only.
+Values above 8 are disabled because multi-node NCCL IB bring-up currently hangs on b200/b300.
 `MASTER_ADDR` is derived by parsing `SLURM_NODELIST`.
 
 ## Adding a backend / op

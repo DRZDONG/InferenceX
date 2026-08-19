@@ -31,16 +31,16 @@ def block(key: str, link: str) -> bytes:
 
 def test_parse_target_url_accepts_run_and_job_urls() -> None:
     assert parse_target_url(
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/123"
-    ) == ("SemiAnalysisAI/InferenceX-Private-TPU", 123, None)
+        "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/123"
+    ) == ("SemiAnalysisAI/InferenceX", 123, None)
     assert parse_target_url(
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/123/job/456"
-    ) == ("SemiAnalysisAI/InferenceX-Private-TPU", 123, 456)
+        "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/123/job/456"
+    ) == ("SemiAnalysisAI/InferenceX", 123, 456)
 
 
 def test_parse_target_url_rejects_non_actions_url() -> None:
     with pytest.raises(RecoveryError, match="Actions run URL"):
-        parse_target_url("https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1")
+        parse_target_url("https://github.com/SemiAnalysisAI/InferenceX/pull/1")
 
 
 def test_select_failed_job_uses_explicit_job() -> None:
@@ -78,7 +78,7 @@ def test_audit_changelog_rejects_duplicate_yaml_keys() -> None:
     - First
   description:
     - Second
-  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/1
 """
 
     with pytest.raises(ChangelogValidationError, match="duplicate key"):
@@ -88,7 +88,7 @@ def test_audit_changelog_rejects_duplicate_yaml_keys() -> None:
 def test_audit_changelog_reports_repairable_missing_newline() -> None:
     raw = block(
         "config-a",
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1",
+        "https://github.com/SemiAnalysisAI/InferenceX/pull/1",
     ).rstrip(b"\n")
 
     result = audit_changelog_bytes(raw, "snapshot")
@@ -100,11 +100,11 @@ def test_audit_changelog_reports_repairable_missing_newline() -> None:
 def test_validate_reconstruction_requires_exact_base_prefix() -> None:
     base = block(
         "base",
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1",
+        "https://github.com/SemiAnalysisAI/InferenceX/pull/1",
     )
     repaired = base + b"\n" + block(
         "new",
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/42",
+        "https://github.com/SemiAnalysisAI/InferenceX/pull/42",
     )
 
     assert validate_reconstruction(base, repaired, 42) == (1, 0)
@@ -276,7 +276,7 @@ def test_synthetic_commit_uses_base_tree_plus_only_changelog(
     git("config", "user.email", "test@example.com")
     base_changelog = block(
         "base",
-        "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/1",
+        "https://github.com/SemiAnalysisAI/InferenceX/pull/1",
     )
     (repo / "perf-changelog.yaml").write_bytes(base_changelog)
     (repo / "other.txt").write_text("base\n")
@@ -289,7 +289,7 @@ def test_synthetic_commit_uses_base_tree_plus_only_changelog(
         + b"\n"
         + block(
             "new",
-            "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/42",
+            "https://github.com/SemiAnalysisAI/InferenceX/pull/42",
         )
     )
     (repo / "other.txt").write_text("changed by target PR\n")

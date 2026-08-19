@@ -28,7 +28,7 @@ def test_find_reuse_authorization_uses_latest_allowed_comment(monkeypatch) -> No
     monkeypatch.setattr(reuse, "paginated_github_api", fake_paginated_github_api)
 
     assert reuse.find_reuse_authorization(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         1321,
         "token",
         "/reuse-sweep-run",
@@ -49,7 +49,7 @@ def test_find_reuse_authorization_accepts_command_without_run_id(monkeypatch) ->
     monkeypatch.setattr(reuse, "paginated_github_api", fake_paginated_github_api)
 
     assert reuse.find_reuse_authorization(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         1321,
         "token",
         "/reuse-sweep-run",
@@ -75,7 +75,7 @@ def test_find_reuse_authorization_lets_newer_no_arg_unpin_older_pin(monkeypatch)
     monkeypatch.setattr(reuse, "paginated_github_api", fake_paginated_github_api)
 
     assert reuse.find_reuse_authorization(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         1321,
         "token",
         "/reuse-sweep-run",
@@ -96,7 +96,7 @@ def test_find_reuse_authorization_ignores_inline_mentions(monkeypatch) -> None:
     monkeypatch.setattr(reuse, "paginated_github_api", fake_paginated_github_api)
 
     assert reuse.find_reuse_authorization(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         1321,
         "token",
         "/reuse-sweep-run",
@@ -125,7 +125,7 @@ def test_find_latest_successful_pr_run_skips_newer_failed_run(monkeypatch) -> No
 
     assert (
         reuse.find_latest_successful_pr_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             "feature-branch",
             {"abc123"},
@@ -159,7 +159,7 @@ def test_find_latest_successful_pr_run_skips_gated_noop_run(monkeypatch) -> None
 
     assert (
         reuse.find_latest_successful_pr_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             "feature-branch",
             {"abc123", "def456"},
@@ -191,7 +191,7 @@ def test_find_latest_successful_pr_run_accepts_agentic_only_run(
 
     assert (
         reuse.find_latest_successful_pr_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             "feature-branch",
             {"abc123"},
@@ -238,7 +238,7 @@ def test_main_skips_pr_synchronize_with_reuse_authorization(
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "abc123",
             "--event-name",
@@ -284,7 +284,7 @@ def test_main_allows_pr_synchronize_without_reuse_authorization(
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "abc123",
             "--event-name",
@@ -322,7 +322,7 @@ def test_main_does_not_check_reuse_comment_for_label_event(
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "abc123",
             "--event-name",
@@ -349,7 +349,7 @@ def test_validate_reusable_run_accepts_successful_same_pr_run(monkeypatch) -> No
     monkeypatch.setattr(reuse, "pr_commit_shas", lambda *args: {"abc123"})
 
     reuse.validate_reusable_run(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         "run-sweep.yml",
         1321,
         {
@@ -372,7 +372,7 @@ def test_validate_reusable_run_accepts_failed_run_when_explicitly_allowed(
     monkeypatch.setattr(reuse, "pr_commit_shas", lambda *args: {"abc123"})
 
     reuse.validate_reusable_run(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         "run-sweep.yml",
         1321,
         {
@@ -394,7 +394,7 @@ def test_validate_reusable_run_rejects_failed_run_by_default(monkeypatch) -> Non
 
     try:
         reuse.validate_reusable_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             1321,
             {
@@ -425,7 +425,7 @@ def test_validate_reusable_run_accepts_cancelled_run_when_explicitly_allowed(
     monkeypatch.setattr(reuse, "pr_commit_shas", lambda *args: {"abc123"})
 
     reuse.validate_reusable_run(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         "run-sweep.yml",
         1321,
         {
@@ -447,7 +447,7 @@ def test_validate_reusable_run_rejects_cancelled_run_by_default(monkeypatch) -> 
 
     try:
         reuse.validate_reusable_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             1321,
             {
@@ -484,7 +484,7 @@ def test_validate_reusable_run_accepts_run_for_older_pr_commit(monkeypatch) -> N
     )
 
     reuse.validate_reusable_run(
-        "SemiAnalysisAI/InferenceX-Private-TPU",
+        "SemiAnalysisAI/InferenceX",
         "run-sweep.yml",
         1321,
         {
@@ -506,7 +506,7 @@ def test_validate_reusable_run_rejects_run_for_orphaned_commit(monkeypatch) -> N
 
     try:
         reuse.validate_reusable_run(
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "run-sweep.yml",
             1321,
             {
@@ -542,7 +542,7 @@ def test_main_enables_pinned_reuse_without_extra_label(monkeypatch, tmp_path) ->
         "path": ".github/workflows/run-sweep.yml",
         "pull_requests": [{"number": 1321}],
         "run_attempt": 1,
-        "html_url": "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/25763404168",
+        "html_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/25763404168",
         "head_sha": "abc123",
     }
 
@@ -578,7 +578,7 @@ def test_main_enables_pinned_reuse_without_extra_label(monkeypatch, tmp_path) ->
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -614,7 +614,7 @@ def test_main_enables_explicitly_pinned_failed_run(monkeypatch, tmp_path) -> Non
         "conclusion": "failure",
         "path": ".github/workflows/run-sweep.yml",
         "run_attempt": 1,
-        "html_url": "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/25763404168",
+        "html_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/25763404168",
         "head_sha": "abc123",
     }
 
@@ -650,7 +650,7 @@ def test_main_enables_explicitly_pinned_failed_run(monkeypatch, tmp_path) -> Non
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -685,7 +685,7 @@ def test_main_resolves_no_arg_command_to_latest_head_sweep(monkeypatch, tmp_path
         "path": ".github/workflows/run-sweep.yml",
         "pull_requests": [{"number": 1321}],
         "run_attempt": 1,
-        "html_url": "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/25763404168",
+        "html_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/25763404168",
         "head_sha": "abc123",
     }
 
@@ -722,7 +722,7 @@ def test_main_resolves_no_arg_command_to_latest_head_sweep(monkeypatch, tmp_path
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -765,7 +765,7 @@ def test_main_no_arg_picks_run_for_older_pr_commit(monkeypatch, tmp_path) -> Non
         "path": ".github/workflows/run-sweep.yml",
         "pull_requests": [],
         "run_attempt": 1,
-        "html_url": "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/25763466401",
+        "html_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/25763466401",
         "head_sha": "f6b43f745a7df3653d677b30372b05d3bec6f153",
     }
 
@@ -808,7 +808,7 @@ def test_main_no_arg_picks_run_for_older_pr_commit(monkeypatch, tmp_path) -> Non
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -850,7 +850,7 @@ def test_main_disables_reuse_without_pinned_comment(monkeypatch, tmp_path) -> No
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -889,7 +889,7 @@ def test_main_accepts_all_evals_with_non_canary_full_sweep_label(
         "path": ".github/workflows/run-sweep.yml",
         "pull_requests": [{"number": 1321}],
         "run_attempt": 1,
-        "html_url": "https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/actions/runs/25763404168",
+        "html_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/25763404168",
         "head_sha": "abc123",
     }
 
@@ -928,7 +928,7 @@ def test_main_accepts_all_evals_with_non_canary_full_sweep_label(
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -989,7 +989,7 @@ def test_main_rejects_incompatible_label_for_reuse(
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",
@@ -1043,7 +1043,7 @@ def test_main_rejects_pr_with_neither_full_sweep_label(monkeypatch, tmp_path) ->
         [
             "find_reusable_sweep_run.py",
             "--repo",
-            "SemiAnalysisAI/InferenceX-Private-TPU",
+            "SemiAnalysisAI/InferenceX",
             "--commit-sha",
             "merge-sha",
             "--event-name",

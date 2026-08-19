@@ -2,10 +2,10 @@
 #SBATCH -p h200
 #SBATCH --gres=gpu:8
 #SBATCH --container-image=vllm/vllm-openai:nightly
-#SBATCH --container-mounts=/mnt/home/user/inferperf/qwen3.5:/workspace,/mnt/vast/model_weights/qwen3.5:/model_storage
+#SBATCH --container-mounts=/mnt/home/kimbo/inferperf/qwen3.5:/workspace,/mnt/vast/model_weights/qwen3.5:/model_storage
 #SBATCH --no-container-entrypoint
 #SBATCH --job-name=vllm-qwen35-tp
-#SBATCH --output=/mnt/home/user/inferperf/qwen3.5/logs/vllm-server-tp8.log
+#SBATCH --output=/mnt/home/kimbo/inferperf/qwen3.5/logs/vllm-server-tp8.log
 #SBATCH --open-mode=append
 
 # Persistent vLLM server for Qwen3.5-397B-A17B (tensor-parallel)

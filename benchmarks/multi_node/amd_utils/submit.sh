@@ -47,6 +47,10 @@ Required environment variables:
   MODEL_NAME       Model name directory
   CONTAINER_IMAGE  Docker image name (e.g., vllm_disagg_pd:latest)
   RUNNER_NAME      Runner identifier (for job name)
+
+Optional environment variables:
+  DRY_RUN          1 = echo composed server/router launch commands instead of
+                   running them (preview a recipe against a real allocation).
 USAGE
 }
 
@@ -109,9 +113,23 @@ export yD=$DECODE_WORKERS
 export PREFILL_TP_SIZE=$(( $PREFILL_NODES * $PREFILL_TP / $PREFILL_WORKERS ))
 export PREFILL_ENABLE_EP=${PREFILL_ENABLE_EP}
 export PREFILL_ENABLE_DP=${PREFILL_ENABLE_DP}
+export PREFILL_TP
+export PREFILL_EP=${PREFILL_EP:-1}
+export PREFILL_DP_ATTN=${PREFILL_DP_ATTN:-false}
+export PREFILL_NUM_WORKERS=${PREFILL_NUM_WORKERS:-$PREFILL_WORKERS}
+export PREFILL_PP_SIZE=${PREFILL_PP_SIZE:-1}
+export PREFILL_DCP_SIZE=${PREFILL_DCP_SIZE:-1}
+export PREFILL_PCP_SIZE=${PREFILL_PCP_SIZE:-1}
 export DECODE_TP_SIZE=$(( $DECODE_NODES * $DECODE_TP / $DECODE_WORKERS ))
 export DECODE_ENABLE_EP=${DECODE_ENABLE_EP}
 export DECODE_ENABLE_DP=${DECODE_ENABLE_DP}
+export DECODE_TP
+export DECODE_EP=${DECODE_EP:-1}
+export DECODE_DP_ATTN=${DECODE_DP_ATTN:-false}
+export DECODE_NUM_WORKERS=${DECODE_NUM_WORKERS:-$DECODE_WORKERS}
+export DECODE_PP_SIZE=${DECODE_PP_SIZE:-1}
+export DECODE_DCP_SIZE=${DECODE_DCP_SIZE:-1}
+export DECODE_PCP_SIZE=${DECODE_PCP_SIZE:-1}
 export DECODE_MTP_SIZE=${DECODE_MTP_SIZE}
 
 export NUM_NODES=$NUM_NODES
@@ -124,6 +142,12 @@ export BENCH_MAX_CONCURRENCY=${CONCURRENCIES}
 export BENCH_REQUEST_RATE=${REQUEST_RATE}
 export BENCH_RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0.8}
 
+# DRY_RUN=1 makes server_sglang.sh echo the composed prefill/decode/router launch
+# commands instead of executing them (useful for previewing a recipe against a real
+# allocation). Threaded here → job.slurm → Docker (-e DRY_RUN) → server_sglang.sh.
+# sbatch defaults to --export=ALL, so exporting it is what carries it into the job.
+export DRY_RUN="${DRY_RUN:-0}"
+
 # Eval-related env vars (threaded from workflow → runner → here → job.slurm → Docker)
 export RUN_EVAL="${RUN_EVAL:-false}"
 export EVAL_ONLY="${EVAL_ONLY:-false}"
@@ -135,6 +159,12 @@ export RUNNER_TYPE="${RUNNER_TYPE:-}"
 export RESULT_FILENAME="${RESULT_FILENAME:-}"
 export SPEC_DECODING="${SPEC_DECODING:-}"
 export IS_MULTINODE="${IS_MULTINODE:-false}"
+export SWEBENCH_USE_MODAL="${SWEBENCH_USE_MODAL:-false}"
+export MODAL_TOKEN_ID="${MODAL_TOKEN_ID:-}"
+export MODAL_TOKEN_SECRET="${MODAL_TOKEN_SECRET:-}"
+export HF_TOKEN="${HF_TOKEN:-}"
+export SCENARIO_TYPE="${SCENARIO_TYPE:-}"
+export EVAL_LIMIT="${EVAL_LIMIT:-}"
 
 # Log directory: must be on NFS (shared filesystem) so the submit host can read SLURM output.
 export BENCHMARK_LOGS_DIR="${BENCHMARK_LOGS_DIR:-$(pwd)/benchmark_logs}"
@@ -156,7 +186,7 @@ fi
 # Optional: exclude specific nodes (e.g. nodes with broken Docker sockets).
 # Set SLURM_EXCLUDE_NODES env var to a comma-separated list of hostnames.
 EXCLUDE_OPT=()
-SLURM_EXCLUDE_NODES="${SLURM_EXCLUDE_NODES:-mia1-p01-g09,mia1-p01-g11,mia1-p01-g12,mia1-p01-g14,mia1-p01-g15}"
+SLURM_EXCLUDE_NODES="${SLURM_EXCLUDE_NODES:-mia1-p01-g09,mia1-p01-g10,mia1-p01-g11,mia1-p01-g12}"
 if [[ -n "${SLURM_EXCLUDE_NODES:-}" ]]; then
     EXCLUDE_OPT=(--exclude "$SLURM_EXCLUDE_NODES")
 fi

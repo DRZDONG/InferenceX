@@ -4,11 +4,15 @@ Since process_result.py executes code at module import time, we test it by:
 1. Testing the get_required_env_vars function directly
 2. Running the script as a subprocess with mocked environment and files
 """
-import pytest
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+from aggregate_power_multinode import ROLE_METRIC_KEYS, WHOLE_METRIC_KEYS
+from test_aggregate_power_multinode import PRODUCER_SHA, build_package
 
 SCRIPT_PATH = Path(__file__).parent / "process_result.py"
 
@@ -48,6 +52,7 @@ def base_env_vars():
         "DISAGG": "false",
         "MODEL_PREFIX": "dsr1",
         "IMAGE": "test-image",
+        "RECIPE_FINGERPRINT": "a" * 64,
     }
 
 
@@ -97,6 +102,34 @@ def run_script(tmp_path, env, benchmark_result, result_filename="benchmark_resul
 
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def run_script_with_broken_aggregator(
+    tmp_path, env, benchmark_result, result_filename="benchmark_result"
+):
+    """Run process_result with the real aggregator patched to raise unexpectedly."""
+    result_file = tmp_path / f"{result_filename}.json"
+    result_file.write_text(json.dumps(benchmark_result))
+    env = {**env, "RESULT_FILENAME": result_filename}
+    wrapper = f"""
+import runpy
+import sys
+
+sys.path.insert(0, {str(SCRIPT_PATH.parent)!r})
+import aggregate_power
+
+def broken_run(**kwargs):
+    raise RuntimeError("forced aggregation failure")
+aggregate_power.run = broken_run
+runpy.run_path({str(SCRIPT_PATH)!r}, run_name="__main__")
+"""
+    return subprocess.run(
+        [sys.executable, "-c", wrapper],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -183,6 +216,7 @@ class TestProcessResultScript:
         assert output_data["isl"] == 1024
         assert output_data["osl"] == 1024
         assert output_data["disagg"] is False
+        assert output_data["recipe_fingerprint"] == "a" * 64
 
         # Verify single-node specific fields
         assert output_data["is_multinode"] is False
@@ -280,8 +314,10 @@ class TestProcessResultScript:
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / chips)
         assert output_data["input_tput_per_gpu"] == pytest.approx((15000.5 - 12000.0) / chips)
 
-    def test_tpuv7_disagg_per_physical_chip(self, tmp_path, sample_benchmark_result, base_env_vars):
-        """TPU v7 disagg: prefill/decode device counts are logical -> normalize per physical chip (/2)."""
+    def test_tpuv7_disagg_per_physical_chip(
+        self, tmp_path, sample_benchmark_result, base_env_vars
+    ):
+        """TPU v7 disagg normalizes logical prefill and decode devices to physical chips."""
         env = {
             **base_env_vars,
             "RUNNER_TYPE": "tpuv7",
@@ -304,12 +340,45 @@ class TestProcessResultScript:
         assert result.returncode == 0, f"Script failed: {result.stderr}"
         output_data = json.loads(result.stdout)
 
-        total_chips = (8 + 8) / 2   # 16 logical -> 8 physical chips
+        total_chips = (8 + 8) / 2
         decode_chips = 8 / 2
         prefill_chips = 8 / 2
         assert output_data["tput_per_gpu"] == pytest.approx(15000.5 / total_chips)
         assert output_data["output_tput_per_gpu"] == pytest.approx(12000.0 / decode_chips)
-        assert output_data["input_tput_per_gpu"] == pytest.approx((15000.5 - 12000.0) / prefill_chips)
+        assert output_data["input_tput_per_gpu"] == pytest.approx(
+            (15000.5 - 12000.0) / prefill_chips
+        )
+
+    def test_component_metadata_is_emitted_when_present(
+        self, tmp_path, sample_benchmark_result, multinode_env_vars
+    ):
+        env = {
+            **multinode_env_vars,
+            "ROUTER_METADATA": json.dumps({"name": "vllm-router", "version": "0.1.14"}),
+            "KV_P2P_TRANSFER": "mooncake",
+        }
+
+        result = run_script(tmp_path, env, sample_benchmark_result)
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        output_data = json.loads(result.stdout)
+        assert output_data["router"] == {"name": "vllm-router", "version": "0.1.14"}
+        assert output_data["kv_p2p_transfer"] == "mooncake"
+
+    @pytest.mark.parametrize("metadata", [
+        {"name": "vllm-router"},
+        {"name": "vllm-router", "version": "0.1.14", "mode": "round-robin"},
+    ])
+    def test_component_metadata_rejects_partial_or_extra_fields(
+        self, tmp_path, sample_benchmark_result, single_node_env_vars, metadata
+    ):
+        env = {**single_node_env_vars, "ROUTER_METADATA": json.dumps(metadata)}
+
+        result = run_script(tmp_path, env, sample_benchmark_result)
+
+        assert result.returncode != 0
+        assert "must contain exactly 'name' and 'version'" in result.stderr
+
     def test_homogeneous_multinode_omits_hardware_fields(
         self, tmp_path, sample_benchmark_result, multinode_env_vars
     ):
@@ -468,8 +537,9 @@ class TestCalculations:
         assert result.returncode != 0
         assert "non-positive throughput" in result.stderr
 
+
     def test_throughput_per_gpu_single_node(self, tmp_path, single_node_env_vars):
-        """Test throughput per GPU calculation for single node."""
+        """PP and PCP expand the GPU denominator while DCP remains metadata."""
         benchmark_result = {
             "model_id": "test-model",
             "max_concurrency": 8,
@@ -478,15 +548,18 @@ class TestCalculations:
         }
 
         env = single_node_env_vars.copy()
-        env["TP"] = "4"
+        env.update({"TP": "4", "PP_SIZE": "2", "DCP_SIZE": "2", "PCP_SIZE": "2"})
 
         result = run_script(tmp_path, env, benchmark_result)
         assert result.returncode == 0, f"Script failed: {result.stderr}"
 
         output_data = json.loads(result.stdout)
-        assert output_data["tput_per_gpu"] == pytest.approx(2000.0)  # 8000 / 4
-        assert output_data["output_tput_per_gpu"] == pytest.approx(1500.0)  # 6000 / 4
-        assert output_data["input_tput_per_gpu"] == pytest.approx(500.0)  # (8000 - 6000) / 4
+        assert output_data["pp"] == 2
+        assert output_data["dcp_size"] == 2
+        assert output_data["pcp_size"] == 2
+        assert output_data["tput_per_gpu"] == pytest.approx(8000.0 / 16)
+        assert output_data["output_tput_per_gpu"] == pytest.approx(6000.0 / 16)
+        assert output_data["input_tput_per_gpu"] == pytest.approx(2000.0 / 16)
 
     def test_throughput_per_gpu_multinode(self, tmp_path, multinode_env_vars):
         """Test throughput per GPU calculation for multinode."""
@@ -500,11 +573,29 @@ class TestCalculations:
         env = multinode_env_vars.copy()
         env["PREFILL_GPUS"] = "20"
         env["DECODE_GPUS"] = "8"
+        env.update({
+            "PREFILL_PP_SIZE": "2",
+            "PREFILL_DCP_SIZE": "2",
+            "PREFILL_PCP_SIZE": "2",
+            "DECODE_PP_SIZE": "2",
+            "DECODE_DCP_SIZE": "4",
+            "DECODE_PCP_SIZE": "1",
+        })
 
         result = run_script(tmp_path, env, benchmark_result)
         assert result.returncode == 0, f"Script failed: {result.stderr}"
 
         output_data = json.loads(result.stdout)
+        assert (
+            output_data["prefill_pp"],
+            output_data["prefill_dcp_size"],
+            output_data["prefill_pcp_size"],
+        ) == (2, 2, 2)
+        assert (
+            output_data["decode_pp"],
+            output_data["decode_dcp_size"],
+            output_data["decode_pcp_size"],
+        ) == (2, 4, 1)
         assert output_data["tput_per_gpu"] == pytest.approx(1000.0)  # 28000 / 28
         assert output_data["output_tput_per_gpu"] == pytest.approx(2000.0)  # 16000 / 8
         assert output_data["input_tput_per_gpu"] == pytest.approx(600.0)  # (28000 - 16000) / 20
@@ -667,10 +758,10 @@ class TestEdgeCases:
 
 class TestPowerAggregationIntegration:
     """End-to-end wiring: process_result.py invokes aggregate_power.py and
-    patches avg_power_w + joules_per_output_token into the agg JSON.
+    patches the validated whole-deployment power contract into the agg JSON.
 
     Exercises the env-var path resolution (GPU_METRICS_CSV), the subprocess
-    boundary, and the best-effort try/except that wraps the aggregator call.
+    boundary, topology validation, and best-effort/strict modes.
     """
 
     @staticmethod
@@ -713,6 +804,8 @@ class TestPowerAggregationIntegration:
             "benchmark_start_time_unix": start,
             "benchmark_end_time_unix": end,
             "duration": 60.0,
+            "completed": 30,
+            "total_input_tokens": 240_000,
             "total_output_tokens": 30_000,
         }
         env = {**single_node_env_vars, "GPU_METRICS_CSV": str(csv_path)}
@@ -729,9 +822,15 @@ class TestPowerAggregationIntegration:
         assert patched["tp"] == 8
         assert patched["conc"] == 64
         # New power fields.
+        assert patched["power_valid"] == 1
         assert patched["avg_power_w"] == pytest.approx(600.0, abs=0.5)
+        assert patched["avg_total_gpu_power_w"] == pytest.approx(4_800.0, abs=0.5)
+        assert patched["total_gpu_energy_j"] == pytest.approx(288_000.0, abs=0.5)
+        assert patched["joules_per_successful_query"] == pytest.approx(9_600.0, abs=0.05)
+        assert patched["joules_per_input_token"] == pytest.approx(1.2, abs=0.01)
         # 600W × 8 GPUs × 60s / 30_000 tokens = 9.6 J/tok
         assert patched["joules_per_output_token"] == pytest.approx(9.6, abs=0.05)
+        assert (tmp_path / "power_validation_benchmark_result.json").is_file()
 
     def test_missing_csv_does_not_break_process_result(self, tmp_path, single_node_env_vars):
         """Without GPU_METRICS_CSV (or with a missing file), process_result.py
@@ -742,6 +841,12 @@ class TestPowerAggregationIntegration:
             "max_concurrency": 64,
             "total_token_throughput": 1000.0,
             "output_throughput": 500.0,
+            "benchmark_start_time_unix": 1_700_000_100.0,
+            "benchmark_end_time_unix": 1_700_000_110.0,
+            "duration": 10.0,
+            "completed": 4,
+            "total_input_tokens": 32_768,
+            "total_output_tokens": 4_096,
         }
 
         result = run_script(tmp_path, single_node_env_vars, benchmark_result)
@@ -751,6 +856,13 @@ class TestPowerAggregationIntegration:
         patched = json.loads(agg_path.read_text())
         assert "avg_power_w" not in patched
         assert "joules_per_output_token" not in patched
+        assert patched["power_valid"] == 0
+        assert "power_invalid_reasons" not in patched
+
+        validation = json.loads(
+            (tmp_path / "power_validation_benchmark_result.json").read_text()
+        )
+        assert validation["reasons"] == ["telemetry_file_missing"]
 
     def test_missing_bench_timestamps_does_not_patch(self, tmp_path, single_node_env_vars):
         """A CSV is present but the bench JSON predates the timestamp fields
@@ -775,3 +887,584 @@ class TestPowerAggregationIntegration:
         patched = json.loads(agg_path.read_text())
         assert "avg_power_w" not in patched
         assert "joules_per_output_token" not in patched
+        assert patched["power_valid"] == 0
+        assert "power_invalid_reasons" not in patched
+
+    def test_expected_gpu_count_mismatch_is_invalid(self, tmp_path, single_node_env_vars):
+        """TP/PP/PCP topology is checked against the observed device IDs."""
+        start, end = 1_700_000_100.0, 1_700_000_110.0
+        csv_path = tmp_path / "gpu_metrics.csv"
+        self._write_nvidia_csv(csv_path, start, end, watts_per_gpu=600.0, num_gpus=4)
+        benchmark_result = {
+            "model_id": "test-model",
+            "max_concurrency": 4,
+            "total_token_throughput": 1000.0,
+            "output_throughput": 500.0,
+            "benchmark_start_time_unix": start,
+            "benchmark_end_time_unix": end,
+            "duration": 10.0,
+            "completed": 4,
+            "total_input_tokens": 32_768,
+            "total_output_tokens": 4_096,
+        }
+        env = {**single_node_env_vars, "GPU_METRICS_CSV": str(csv_path)}
+
+        result = run_script(tmp_path, env, benchmark_result)
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        patched = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert patched["power_valid"] == 0
+        assert "power_invalid_reasons" not in patched
+        assert "total_gpu_energy_j" not in patched
+
+    def test_require_power_propagates_validation_failure(
+        self, tmp_path, single_node_env_vars
+    ):
+        """Study/CI mode must fail after preserving validation artifacts."""
+        benchmark_result = {
+            "model_id": "test-model",
+            "max_concurrency": 4,
+            "total_token_throughput": 1000.0,
+            "output_throughput": 500.0,
+            "benchmark_start_time_unix": 1_700_000_100.0,
+            "benchmark_end_time_unix": 1_700_000_110.0,
+            "duration": 10.0,
+            "completed": 4,
+            "total_input_tokens": 32_768,
+            "total_output_tokens": 4_096,
+        }
+        env = {**single_node_env_vars, "REQUIRE_POWER": "1"}
+
+        result = run_script(tmp_path, env, benchmark_result)
+
+        assert result.returncode != 0
+        assert "Power validation failed" in result.stderr
+        validation = json.loads(
+            (tmp_path / "power_validation_benchmark_result.json").read_text()
+        )
+        assert validation["reasons"] == ["telemetry_file_missing"]
+
+    def test_require_power_accepts_valid_single_node_measurement(
+        self, tmp_path, single_node_env_vars
+    ):
+        """The strict H100/H200 canary path also has a protected success case."""
+        start, end = 1_700_000_100.0, 1_700_000_110.0
+        csv_path = tmp_path / "gpu_metrics.csv"
+        self._write_nvidia_csv(
+            csv_path,
+            start,
+            end,
+            watts_per_gpu=500.0,
+            num_gpus=8,
+        )
+        benchmark_result = {
+            "model_id": "test-model",
+            "max_concurrency": 4,
+            "total_token_throughput": 1000.0,
+            "output_throughput": 500.0,
+            "benchmark_start_time_unix": start,
+            "benchmark_end_time_unix": end,
+            "duration": 10.0,
+            "completed": 4,
+            "total_input_tokens": 32_768,
+            "total_output_tokens": 4_096,
+        }
+        env = {
+            **single_node_env_vars,
+            "GPU_METRICS_CSV": str(csv_path),
+            "REQUIRE_POWER": "1",
+        }
+
+        result = run_script(tmp_path, env, benchmark_result)
+
+        assert result.returncode == 0, result.stderr
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_metric_schema_version"] == 2
+        assert agg["power_valid"] == 1
+        assert agg["total_gpu_energy_j"] == pytest.approx(40_000.0)
+        validation = json.loads(
+            (tmp_path / "power_validation_benchmark_result.json").read_text()
+        )
+        assert validation["power_valid"] is True
+        assert validation["reasons"] == []
+
+    @pytest.mark.parametrize(
+        ("require_power", "expected_returncode"),
+        [(False, 0), (True, 1)],
+    )
+    def test_internal_aggregation_error_is_always_auditable(
+        self,
+        tmp_path,
+        single_node_env_vars,
+        require_power,
+        expected_returncode,
+    ):
+        benchmark_result = {
+            "model_id": "test-model",
+            "max_concurrency": 4,
+            "total_token_throughput": 1000.0,
+            "output_throughput": 500.0,
+            "benchmark_start_time_unix": 1_700_000_100.0,
+            "benchmark_end_time_unix": 1_700_000_110.0,
+            "duration": 10.0,
+            "completed": 4,
+            "total_input_tokens": 32_768,
+            "total_output_tokens": 4_096,
+        }
+        env = single_node_env_vars.copy()
+        if require_power:
+            env["REQUIRE_POWER"] = "1"
+
+        result = run_script_with_broken_aggregator(tmp_path, env, benchmark_result)
+
+        assert result.returncode == expected_returncode
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_metric_schema_version"] == 2
+        assert agg["power_valid"] == 0
+        assert "power_invalid_reasons" not in agg
+        validation = json.loads(
+            (tmp_path / "power_validation_benchmark_result.json").read_text()
+        )
+        assert validation["power_valid"] is False
+        assert validation["reasons"] == ["aggregation_internal_error"]
+        assert validation["internal_error"]["type"] == "RuntimeError"
+
+    def test_stop_gpu_monitor_appends_final_nvidia_sample(self, tmp_path):
+        """Stopping between 1 Hz ticks still records one post-benchmark sample."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        args_log = tmp_path / "nvidia_args.txt"
+        fake_nvidia_smi = fake_bin / "nvidia-smi"
+        fake_nvidia_smi.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$*\" > {str(args_log)!r}\n"
+            "printf '%s\\n' "
+            "'2026/07/23 12:00:11.000, 0, 500.00 W, 65, 1000, 1000, 90 %, 10 %'\n"
+        )
+        fake_nvidia_smi.chmod(0o755)
+        metrics = tmp_path / "gpu_metrics.csv"
+        metrics.write_text(
+            "timestamp, index, power.draw [W], temperature.gpu, "
+            "clocks.current.sm [MHz], clocks.current.memory [MHz], "
+            "utilization.gpu [%], utilization.memory [%]\n"
+        )
+        benchmark_lib = Path(__file__).parents[1] / "benchmarks/benchmark_lib.sh"
+        script = f"""
+source {str(benchmark_lib)!r}
+kill() {{ return 0; }}
+wait() {{ return 0; }}
+GPU_MONITOR_PID=999
+GPU_MONITOR_VENDOR=nvidia
+GPU_METRICS_CSV={str(metrics)!r}
+stop_gpu_monitor
+"""
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "--format=csv,noheader" in args_log.read_text()
+        assert "2026/07/23 12:00:11.000, 0, 500.00 W" in metrics.read_text()
+
+    def test_stop_gpu_monitor_drops_truncated_row_before_final_sample(self, tmp_path):
+        """A killed monitor cannot concatenate its partial row with the final sample."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_nvidia_smi = fake_bin / "nvidia-smi"
+        final_sample = (
+            "2026/07/23 12:00:11.000, 0, 500.00 W, "
+            "65, 1000, 1000, 90 %, 10 %"
+        )
+        fake_nvidia_smi.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' {final_sample!r}\n"
+        )
+        fake_nvidia_smi.chmod(0o755)
+
+        header = (
+            "timestamp, index, power.draw [W], temperature.gpu, "
+            "clocks.current.sm [MHz], clocks.current.memory [MHz], "
+            "utilization.gpu [%], utilization.memory [%]"
+        )
+        complete_sample = (
+            "2026/07/23 12:00:09.000, 0, 490.00 W, "
+            "64, 990, 990, 89 %, 9 %"
+        )
+        truncated_sample = "2026/07/23 12:00:10.000, 0, 52"
+        metrics = tmp_path / "gpu_metrics.csv"
+        metrics.write_text(
+            f"{header}\n{complete_sample}\n{truncated_sample}"
+        )
+
+        benchmark_lib = Path(__file__).parents[1] / "benchmarks/benchmark_lib.sh"
+        script = f"""
+source {str(benchmark_lib)!r}
+kill() {{ return 0; }}
+wait() {{ return 0; }}
+GPU_MONITOR_PID=999
+GPU_MONITOR_VENDOR=nvidia
+GPU_METRICS_CSV={str(metrics)!r}
+stop_gpu_monitor
+"""
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert metrics.read_text().splitlines() == [
+            header,
+            complete_sample,
+            final_sample,
+        ]
+
+    def test_stop_gpu_monitor_amd_waits_one_tick_and_snapshots_energy(self, tmp_path):
+        """AMD stop lets the watch stream bracket the window, then snapshots energy."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        args_log = tmp_path / "amd_args.txt"
+        fake_amd_smi = fake_bin / "amd-smi"
+        fake_amd_smi.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$*\" >> {str(args_log)!r}\n"
+            "printf 'gpu,total_energy_consumption\\n0,178319501.7\\n'\n"
+        )
+        fake_amd_smi.chmod(0o755)
+        sleep_log = tmp_path / "sleep_args.txt"
+        contents = "timestamp,gpu,socket_power\n1785881113,0,238\n"
+        metrics = tmp_path / "gpu_metrics.csv"
+        metrics.write_text(contents)
+        benchmark_lib = Path(__file__).parents[1] / "benchmarks/benchmark_lib.sh"
+        script = f"""
+source {str(benchmark_lib)!r}
+kill() {{ return 0; }}
+wait() {{ return 0; }}
+sleep() {{ printf '%s\\n' "$1" > {str(sleep_log)!r}; }}
+GPU_MONITOR_PID=999
+GPU_MONITOR_VENDOR=amd
+GPU_MONITOR_INTERVAL=3
+GPU_METRICS_CSV={str(metrics)!r}
+stop_gpu_monitor
+"""
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert sleep_log.read_text().strip() == "5"
+        assert metrics.read_text() == contents
+        assert "metric -E --csv" in args_log.read_text()
+        energy_end = tmp_path / "gpu_metrics_energy_end.csv"
+        assert energy_end.read_text().startswith("gpu,total_energy_consumption")
+
+    def test_stop_gpu_monitor_amd_drops_truncated_row_without_append(self, tmp_path):
+        """The AMD path repairs a partial trailing row but appends no sample."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_amd_smi = fake_bin / "amd-smi"
+        fake_amd_smi.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'gpu,total_energy_consumption\\n0,178319501.7\\n'\n"
+        )
+        fake_amd_smi.chmod(0o755)
+        header = "timestamp,gpu,socket_power"
+        complete_sample = "1785881113,0,238"
+        metrics = tmp_path / "gpu_metrics.csv"
+        metrics.write_text(f"{header}\n{complete_sample}\n1785881114,0,2")
+        benchmark_lib = Path(__file__).parents[1] / "benchmarks/benchmark_lib.sh"
+        script = f"""
+source {str(benchmark_lib)!r}
+kill() {{ return 0; }}
+wait() {{ return 0; }}
+sleep() {{ return 0; }}
+GPU_MONITOR_PID=999
+GPU_MONITOR_VENDOR=amd
+GPU_METRICS_CSV={str(metrics)!r}
+stop_gpu_monitor
+"""
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert metrics.read_text().splitlines() == [header, complete_sample]
+        assert (tmp_path / "gpu_metrics_energy_end.csv").exists()
+
+    def test_start_stop_gpu_monitor_amd_lifecycle(self, tmp_path):
+        """Watch rows survive the kill and both boundary snapshots are written."""
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_amd_smi = fake_bin / "amd-smi"
+        fake_amd_smi.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$*" == *" -w "* ]]; then\n'
+            "    echo \"'CTRL' + 'C' to stop watching output:\"\n"
+            "    echo 'timestamp,gpu,socket_power,power_management'\n"
+            "    for _ in $(seq 1 30); do\n"
+            "        echo \"$(date +%s),0,238,ENABLED\"\n"
+            "        echo 'timestamp,gpu,socket_power,power_management'\n"
+            "        sleep 0.2\n"
+            "    done\n"
+            'elif [[ "$*" == *"metric -E --csv"* ]]; then\n'
+            "    printf 'gpu,total_energy_consumption\\n0,178319501.7\\n'\n"
+            'elif [[ "$1" == "static" ]]; then\n'
+            "    printf '{\"gpu_data\": []}\\n'\n"
+            "fi\n"
+        )
+        fake_amd_smi.chmod(0o755)
+        metrics = tmp_path / "gpu_metrics.csv"
+        benchmark_lib = Path(__file__).parents[1] / "benchmarks/benchmark_lib.sh"
+        script = f"""
+source {str(benchmark_lib)!r}
+start_gpu_monitor --output {str(metrics)!r} --interval 1
+sleep 0.8
+stop_gpu_monitor
+"""
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        lines = metrics.read_text().splitlines()
+        assert lines[0] == "timestamp,gpu,socket_power,power_management"
+        assert sum(1 for line in lines if line.startswith("timestamp,")) == 1
+        assert "CTRL" not in metrics.read_text()
+        data_rows = [line for line in lines[1:] if line]
+        assert len(data_rows) >= 2
+        assert all(row.split(",")[2] == "238" for row in data_rows)
+        energy_start = tmp_path / "gpu_metrics_energy_start.csv"
+        assert energy_start.read_text().startswith("gpu,total_energy_consumption")
+        assert (tmp_path / "gpu_metrics_energy_end.csv").exists()
+        identity = json.loads((tmp_path / "gpu_metrics_identity.json").read_text())
+        assert identity == {"gpu_data": []}
+
+
+# =============================================================================
+# Integration: multinode power aggregation patches the agg JSON
+# =============================================================================
+
+
+class TestMultinodePower:
+    """End-to-end wiring: process_result.py invokes aggregate_power_multinode.py
+    against the srt-slurm artifact package staged under LOGS/.
+
+    The consumer binds the processed copy to LOGS/<result_path> by canonical
+    sha256, so the benchmark result passed to run_script must equal the
+    package's original result byte-for-byte after JSON canonicalization.
+    """
+
+    BENCH_EXTRA = {"total_token_throughput": 15000.5, "output_throughput": 12000.0}
+
+    @pytest.fixture
+    def power_env(self, multinode_env_vars):
+        return {
+            **multinode_env_vars,
+            "PREFILL_GPUS": "2",
+            "DECODE_GPUS": "2",
+            "POWER_PRODUCER_SHA": PRODUCER_SHA,
+        }
+
+    def _build(self, tmp_path, **kwargs):
+        pkg = build_package(tmp_path, bench_extra=self.BENCH_EXTRA, **kwargs)
+        return json.loads(pkg.original_result.read_text())
+
+    def _bench_without_package(self):
+        return {
+            "model_id": "test-model",
+            "max_concurrency": 4,
+            **self.BENCH_EXTRA,
+        }
+
+    def test_valid_package_patches_role_energy(self, tmp_path, power_env):
+        benchmark_result = self._build(tmp_path)
+
+        result = run_script(tmp_path, power_env, benchmark_result)
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_metric_schema_version"] == 2
+        assert agg["power_valid"] == 1
+        assert agg["prefill_gpu_energy_j"] == 48000.0
+        assert agg["decode_gpu_energy_j"] == 36000.0
+        assert agg["prefill_avg_power_w"] == 400.0
+        assert agg["decode_avg_power_w"] == 300.0
+        assert (tmp_path / "power_validation_benchmark_result.json").is_file()
+
+    def test_missing_package_is_best_effort(self, tmp_path, power_env):
+        result = run_script(tmp_path, power_env, self._bench_without_package())
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_metric_schema_version"] == 2
+        assert agg["power_valid"] == 0
+        for key in WHOLE_METRIC_KEYS + ROLE_METRIC_KEYS:
+            assert key not in agg
+        assert (tmp_path / "power_validation_benchmark_result.json").is_file()
+
+    def test_missing_package_fails_in_strict_mode(self, tmp_path, power_env):
+        env = {**power_env, "REQUIRE_POWER": "1"}
+
+        result = run_script(tmp_path, env, self._bench_without_package())
+
+        assert result.returncode != 0
+        assert (tmp_path / "power_validation_benchmark_result.json").is_file()
+
+    def test_invalid_package_withholds_metrics(self, tmp_path, power_env):
+        benchmark_result = self._build(tmp_path, publication_valid=False)
+
+        result = run_script(tmp_path, power_env, benchmark_result)
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_valid"] == 0
+        for key in WHOLE_METRIC_KEYS + ROLE_METRIC_KEYS:
+            assert key not in agg
+        validation = json.loads(
+            (tmp_path / "power_validation_benchmark_result.json").read_text()
+        )
+        assert "producer_verdict_mismatch" in validation["reasons"]
+
+    def test_strict_mode_passes_on_valid_package(self, tmp_path, power_env):
+        benchmark_result = self._build(tmp_path)
+        env = {**power_env, "REQUIRE_POWER": "1"}
+
+        result = run_script(tmp_path, env, benchmark_result)
+
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+        agg = json.loads((tmp_path / "agg_benchmark_result.json").read_text())
+        assert agg["power_valid"] == 1
+
+
+# =============================================================================
+# Static CI/artifact contract
+# =============================================================================
+
+
+class TestPowerWorkflowContract:
+    """Keep power audit inputs separate from the canonical agg artifact."""
+
+    @staticmethod
+    def _repo_root():
+        return Path(__file__).parents[1]
+
+    def test_gpu_monitor_default_matches_uploaded_artifact_path(self):
+        benchmark_lib = self._repo_root() / "benchmarks/benchmark_lib.sh"
+        script = f"""
+unset GPU_METRICS_CSV
+source {str(benchmark_lib)!r}
+printf '%s' "$GPU_METRICS_CSV"
+"""
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "gpu_metrics.csv"
+
+    def test_benchmark_workflow_uploads_independent_power_audit_bundle(self):
+        workflow = (
+            self._repo_root() / ".github/workflows/benchmark-tmpl.yml"
+        ).read_text()
+
+        assert "name: power_audit_${{ env.RESULT_FILENAME }}" in workflow
+        assert "${{ env.RESULT_FILENAME }}.json" in workflow
+        assert "agg_${{ env.RESULT_FILENAME }}.json" in workflow
+        assert "gpu_metrics.csv" in workflow
+        assert "power_validation_${{ env.RESULT_FILENAME }}.json" in workflow
+        assert (
+            "always() && !inputs.eval-only && "
+            "inputs.scenario-type != 'agentic-coding'"
+        ) in workflow
+        assert "require-power:" in workflow
+        assert "REQUIRE_POWER: ${{ inputs.require-power && '1' || '0' }}" in workflow
+
+        # The canonical bmk artifact remains aggregate-only so downstream
+        # result collection cannot mistake the raw benchmark JSON for an agg.
+        upload_result = workflow.split("- name: Upload result", 1)[1].split(
+            "- name: Upload agentic aggregated result", 1
+        )[0]
+        assert "path: agg_${{ env.RESULT_FILENAME }}.json" in upload_result
+        assert "power_validation_" not in upload_result
+
+    def test_cpu_workflow_covers_power_code_and_both_test_suites(self):
+        workflow = (
+            self._repo_root() / ".github/workflows/test-process-result.yml"
+        ).read_text()
+
+        for watched_path in (
+            "utils/aggregate_power.py",
+            "utils/test_aggregate_power.py",
+            "utils/process_result.py",
+            "utils/test_process_result.py",
+            ".github/workflows/benchmark-tmpl.yml",
+            ".github/workflows/e2e-tests.yml",
+            ".github/workflows/test-process-result.yml",
+        ):
+            assert watched_path in workflow
+        assert "test_aggregate_power.py" in workflow
+        assert "test_process_result.py" in workflow
+        assert "github.event.pull_request.draft" not in workflow
+
+    def test_e2e_dispatch_can_enable_strict_power_validation(self):
+        workflow = (
+            self._repo_root() / ".github/workflows/e2e-tests.yml"
+        ).read_text()
+
+        assert workflow.count("require-power:") >= 3
+        single_node_job = workflow.split("test-sweep-single-node:", 1)[1].split(
+            "test-sweep-evals:", 1
+        )[0]
+        assert "require-power: ${{ inputs.require-power }}" in single_node_job
+        agentic_job = workflow.split("test-sweep-agentic:", 1)[1].split(
+            "test-sweep-agentic-evals:", 1
+        )[0]
+        assert "require-power: ${{ inputs.require-power }}" in agentic_job

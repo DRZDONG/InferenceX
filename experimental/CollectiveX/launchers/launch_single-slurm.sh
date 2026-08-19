@@ -22,8 +22,10 @@ case "$RUNNER" in
     PRODUCT=h200; DEFAULT_TIME=45; REQUIRE_ACCOUNT=0
     SRUN_EXTRA=(--container-remap-root)
     ;;
-  b200-dgxc)
-    PRODUCT=b200; DEFAULT_TIME=30; REQUIRE_ACCOUNT=1
+  b200-nscale)
+    # Bare-metal B200 (nsc): native IB rails + gdrdrv make the deepep low-latency EP16 rows
+    # dispatchable, unlike the virtualized dgxc pool. 45 min covers first-run backend builds.
+    PRODUCT=b200; DEFAULT_TIME=45; REQUIRE_ACCOUNT=1
     ALLOC_EXTRA=(--mem=0)
     ;;
   b300)
@@ -36,6 +38,7 @@ case "$RUNNER" in
   *) collx_die "COLLX_SHARD_SKU is not a registered NVIDIA SKU" ;;
 esac
 export COLLX_RUNNER="$RUNNER" COLLX_BENCH="${COLLX_BENCH:-deepep-v2}"
+export COLLX_VENDOR=nvidia
 # ---- setup: operator config, canonical env, topology, network profile -------
 collx_launcher_prologue "$RUNNER"
 
@@ -113,16 +116,24 @@ for allocation_attempt in 1 2 3; do
   elif [ "$RUNNER" = b300 ] \
       && ! collx_validate_cuda_context_on_job "$JOB_ID" "$NODES" "$GPN"; then
     validation_failure=cuda-context
+  elif ! collx_validate_gpu_health_on_job "$JOB_ID" "$NODES" "$GPN"; then
+    validation_failure=gpu-health
   else
     break
   fi
   retryable=0
   [ "$RUNNER:$validation_failure" != h100-dgxc:network ] || retryable=1
   [ "$RUNNER:$validation_failure" != b300:cuda-context ] || retryable=1
+  # A throttled GPU paces every rank, so retrying on another node is right on every SKU.
+  [ "$validation_failure" != gpu-health ] || retryable=1
   if [ "$retryable" = 0 ] || [ "$allocation_attempt" = 3 ]; then
     if [ "$validation_failure" = network ]; then
       collx_log_tail "${COLLX_NETWORK_PROFILE_LOG:-}"
       collx_die "allocated nodes failed the network profile"
+    fi
+    if [ "$validation_failure" = gpu-health ]; then
+      collx_log_tail "${COLLX_GPU_HEALTH_LOG:-}"
+      collx_die "allocated nodes hold a thermally throttled GPU"
     fi
     collx_log_tail "$COLLX_CUDA_CONTEXT_LOG"
     collx_die "allocated nodes failed accelerator context validation"

@@ -879,6 +879,29 @@ def _chain_fields(chain: dict | None) -> dict:
         },
     }
 
+def _row_components(percentiles: dict, sample_counts: dict, pair_period: dict) -> dict:
+    """Build the shared component schema, including the derived isolated sum."""
+    dispatch = percentiles["dispatch"]
+    stage = percentiles["stage"]
+    combine = percentiles["combine"]
+    isolated = (
+        {
+            key: dispatch[key] + (stage[key] if stage is not None else 0.0) + combine[key]
+            for key in dispatch
+        }
+        if dispatch and combine else None
+    )
+    return {
+        "combine": ep_harness._component(combine, sample_counts["combine"]),
+        "dispatch": ep_harness._component(dispatch, sample_counts["dispatch"]),
+        "isolated_sum": ep_harness._component(isolated, 0, derived=True),
+        "pair_period": pair_period,
+        "roundtrip": ep_harness._component(
+            percentiles["roundtrip"], sample_counts["roundtrip"]
+        ),
+        "stage": ep_harness._component(stage, sample_counts["stage"]),
+    }
+
 
 def _correctness(max_rel: float, passed: bool, chain_regime=None) -> dict:
     """The artifact's correctness block, JSON-safe by construction.
@@ -1314,7 +1337,12 @@ def _write_terminal_failure(args, reason: str, vendor: str, ep_size: int,
             "case_factors": {"case": scheduled_case, "sku": args.runner},
             "case_id": args.case_id,
         },
-        "workload": {"cross_rank_consistent": False},
+        "workload": {
+            "cross_rank_consistent": False,
+            "ladder_measured": [],
+            "ladder_dropped": [],
+            "ladder_cap": None,
+        },
         "measurement": {
             "rows": [],
             # Same provenance shape as a successful document, so a consumer reads one
@@ -1328,9 +1356,12 @@ def _write_terminal_failure(args, reason: str, vendor: str, ep_size: int,
             "timing_source": timing_source(False),
         },
         "implementation": {
+            "combine_reduction": "domain-fp32",
+            "library_version": None,
             **fp8_provenance(args.precision),
             "kernel_generation": "jax-ragged-all-to-all",
             "name": args.backend,
+            "maturity": ep_jax.JaxEPTransport.maturity,
             "oracle": "probe-source-identity-and-exact-rank-sum",
         },
         "topology": {
@@ -1380,13 +1411,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="accept host wall-clock for points the profiler did not cover. "
                          "Off by default: a silent fallback publishes a ~450us-floored "
                          "latency under a device label")
-    ap.add_argument("--chain-iters", type=int, default=64,
-                    help="dispatch->combine pairs per chained capture. STATIC in the "
-                         "compiled program, which is what keeps a multi-host slice in "
-                         "lockstep; never derive it from anything host-local")
-    ap.add_argument("--chain-drop", type=int, default=1,
-                    help="leading periods discarded as pipeline fill")
-    ap.add_argument("--xprof-iters", type=int, default=30,
+    ap.add_argument("--xprof-iters", type=int, default=20,
                     help="calls per component per traced ladder point; kept small because "
                          "the profiler records every op on every device")
     ap.add_argument("--reference-method", action="store_true", default=True,
@@ -1980,10 +2005,7 @@ def main() -> int:
         (roundtrip_pcts, roundtrip_n) = _percentiles("roundtrip")
         (stage_pcts, stage_n) = (
             _percentiles(STAGE) if STAGE in measured_components else (None, 0))
-        isolated = (
-            {key: dispatch_pcts[key] + combine_pcts[key] for key in dispatch_pcts}
-            if dispatch_pcts and combine_pcts else None
-        )
+        chain_fields = _chain_fields(measured.get("chain"))
         global_tokens = tokens * ep_size
         # fp8 dispatch moves 1 byte per value plus one FP32 scale per 128-element block;
         # bf16 moves 2 and no scales. Read off the transport so the artifact cannot claim a
@@ -1997,20 +2019,23 @@ def main() -> int:
             rstats["routed_copies"], args.hidden,
         )
         rows.append({
-            "components": {
-                "combine": ep_harness._component(combine_pcts, combine_n),
-                "dispatch": ep_harness._component(dispatch_pcts, dispatch_n),
-                "isolated_sum": ep_harness._component(isolated, 0, derived=True),
-                "roundtrip": ep_harness._component(roundtrip_pcts, roundtrip_n),
-                # BF16: unavailable, and correctly so -- the permute is fused into
-                # dispatch and there is no conversion, so there is nothing to time.
-                # FP8: the fp8->bf16 conversion, hoisted out of combine AND out of the
-                # chained roundtrip and measured here, which is the component the GPU
-                # harness puts the same work in. `roundtrip + stage` then reconstructs the
-                # mismatched-config cost; the reverse direction does not hold.
-                "stage": ep_harness._component(stage_pcts, stage_n),
-            },
-            **_chain_fields(measured.get("chain")),
+            "components": _row_components(
+                {
+                    "combine": combine_pcts,
+                    "dispatch": dispatch_pcts,
+                    "roundtrip": roundtrip_pcts,
+                    "stage": stage_pcts,
+                },
+                {
+                    "combine": combine_n,
+                    "dispatch": dispatch_n,
+                    "roundtrip": roundtrip_n,
+                    "stage": stage_n,
+                },
+                chain_fields["pair_period"],
+            ),
+            "chain_floor_us": chain_fields["chain_floor_us"],
+            "chain_health": chain_fields["chain_health"],
             "correctness": _correctness(
                 max_rel, passed, (measured.get("chain") or {}).get("identity")),
             # Whether the chained roundtrip's trace shows work the standalone combine's does
@@ -2027,6 +2052,11 @@ def main() -> int:
                     for field in dispatch_bytes
                 },
                 "stage": dict.fromkeys(dispatch_bytes, 0),
+            },
+            "logical_copies": {
+                "routed": int(rstats["routed_copies"]),
+                "assignments": int(sum(rstats["expert_assignments_per_rank"])),
+                "wire": "rank-deduplicated",
             },
             "receive": {
                 "max": int(layout.recv_total.max()),
@@ -2103,6 +2133,10 @@ def main() -> int:
             # cross-rank identity is structural here rather than proven by an all-reduce
             # as it is on the GPU path.
             "cross_rank_consistent": True,
+            "ladder_measured": list(ladder),
+            "ladder_dropped": list(dropped),
+            # Admission is layout-dependent, not a fixed token cap.
+            "ladder_cap": None,
         },
         "measurement": {
             "combine_dtype": combine_dtype,
@@ -2120,8 +2154,11 @@ def main() -> int:
         },
         "implementation": {
             **fp8_provenance(args.precision),
+            "combine_reduction": "domain-fp32",
+            "library_version": getattr(jax, "__version__", None),
             "kernel_generation": "jax-ragged-all-to-all",
             "name": args.backend,
+            "maturity": ep_jax.JaxEPTransport.maturity,
             "oracle": "probe-source-identity-and-exact-rank-sum",
         },
         "topology": {

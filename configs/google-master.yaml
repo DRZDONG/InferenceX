@@ -194,6 +194,7 @@ qwen3.5-fp8-tpuv7-disagg-vllm:
   runner: tpuv7
   precision: fp8
   framework: vllm
+  kv-p2p-transfer: tpu-connector-hma
   multinode: true
   disagg: true
   scenarios:

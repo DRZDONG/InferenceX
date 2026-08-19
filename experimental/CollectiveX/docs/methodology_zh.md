@@ -1,260 +1,682 @@
-[English](methodology.md) | [中文](methodology_zh.md)
-
 # CollectiveX EP 基准测试方法
 
-CollectiveX 调度专家并行（EP）通信基准测试，在真实加速器 allocation 上执行，并上传每次
-运行生成的中立产物。它不验证、晋级、排名、推荐、筛选或隐藏这些产物，也不决定任何消费者
-应展示什么。Frontend 读取中立的 matrix、result 与 summary 产物，自行决定 coverage 和
-展示方式。本文说明用例如何被调度、测量、检查和记录，而不是 publication 或 qualification
-contract。
+CollectiveX 调度专家并行（EP）通信基准测试，在真实的
+加速器资源分配上执行这些测试，并上传每次运行产生的中立产物。它**不会**验证
+这些产物，也不会推广、排名、推荐、选择或隐藏它们，亦不会决定任何使用方显示什么。
+前端读取中立的矩阵、结果和摘要产物，并自行作出覆盖范围
+和显示决策。本文档描述如何调度、测量、校验和
+记录一个用例，而非发布或资格认定契约。
 
 ## 产品边界
 
-CollectiveX 是通信 microbenchmark，用于：
+CollectiveX 是一种通信微基准测试，用于：
 
-- 在同一 chip/topology 上比较不同 EP library；
-- 在相同工作负载下比较不同系统的 EP latency 与 logical payload bandwidth；以及
-- 显式呈现 unsupported、failed、invalid 和 unstable 用例，而不是隐藏它们。
+- 在同一芯片/拓扑上比较 EP 库。
+- 在相同工作负载下比较不同系统的 EP 延迟和逻辑载荷带宽。
+- 显式呈现不受支持、失败、无效和不稳定的用例，而不是将其隐藏。
 
-若没有单独的 correlation study，它不预测 serving throughput。
+若无单独的相关性研究，它无法预测服务吞吐量。
 
-## Matrix
+## 矩阵
 
-已实现的工作负载为 `deepseek-v3`：hidden 7168、top-k 8、256 个 routed expert、
-packed placement，并为每个 backend/topology 使用一个固定资源配置。Combine 始终为
-BF16；dispatch precision 是扫描维度，包括 BF16 对照组，以及上游支持 FP8 dispatch 的
-backend（DeepEP V2、MoRI、UCCL-EP）上的 FP8 dispatch（`bf16`、`fp8`）。
-`normal` 模式由调用方预量化；`low-latency` 模式下 DeepEP 和 UCCL-EP kernel 从 BF16
-内部量化，MoRI 仍由调用方预量化。本版本 NCCL EP 仅支持 BF16。每个 backend 的 precision
-集合位于 `sweep_matrix.py` 的 `BACKEND_PRECISIONS`，backend 不会为不支持的 precision
-生成用例。`normal` 用例使用 `layout-and-dispatch-v1`；`low-latency` 用例使用各
-backend 的 decode-kernel semantics。
+已实现的工作负载为 `deepseek-v3`：隐藏维度 7168、top-k 8、256 个路由专家、紧凑式
+放置，以及每种后端/拓扑各有一个固定绑定的资源配置。合并始终为 BF16。
+分发精度是一个扫描维度，其中包含一个 BF16 对照项；对于其 FP8 分发在
+上游受支持的后端（DeepEP V2、MoRI、UCCL-EP、FlashInfer EP），还包含一个 FP8 分发（`bf16`、`fp8`），
+在 `normal` 模式下由调用方预先量化（`low-latency` 内核会在
+DeepEP 和 UCCL-EP 上于内部将 BF16 量化为 FP8，而在 MoRI 上仍由调用方预先量化）。该调用方侧量化的开销计在
+**实测分发之内**，因为生产环境中的前向传播会在关键路径上承担该开销。它
+在 DeepEP V2、UCCL-EP 和 FlashInfer EP 上是单个融合内核，并通过与其 eager
+参考实现进行逐位比对来校验。MoRI 的实现只是普通的 dtype 转换，二者均无需。因此，FP8 `normal` 分发涵盖
+量化加传输，而其 BF16 对照组仅涵盖传输，因此不能与某一行相比
+该行是在那次变更之前测得的。扫描的 `version` 在这次变更前后刻意保持为 1，因此
+`implementation.stage_excluded_from_roundtrip` 以及是否存在 `stage` 组件，才是
+上述变更的判别字段。
 
-- `ep-core`：对工作负载 token ladder 进行 uniform routing。对于 `deepseek-v3`，
-  decode 为 T=1..512 的二次幂，prefill 为 T=1024..8192 的二次幂。Ladder 与 workload
-  一起定义在 `configs/sweep.json`。
+这两个字段并不能区分每一代；值得明确指出它们无法区分哪些代，
+因为版本标签也无济于事。对持久存储中的同一单元格进行比较，可将其量化：
+FP8 量化开销使 dispatch 增加了 +64% 至 +110%（中位数，小 T）。
+扩大 staging hoist 的范围使 FlashInfer roundtrip 降低了 −46%，使 MoRI BF16 降低了 −23%。MoRI 改用
+采用 16 个 warp 的外部输入缓冲区后，gfx950 上的 FP8 combine 增加了 +33% 至 +65%。将 NCCL EP
+HT combine 的大小设为其接收计数后，combine 降低了 −10% 至 −41%。两遍链使
+各处的 `pair_period` 均降低了 −5% 至 −42%。其中只有前两项可由上述字段标识。
 
-`sweep_matrix.py` 将请求的 SKU、backend、EP size 和 token ladder 具体化为 matrix
-文档，再提取严格的 per-shard control。`--only-sku`、`--exclude-skus`、`--ep-sizes`
-和 `--precisions` 可选择子集；子集只会缩小 matrix，不会改变 contract。Matrix 在每次
-dispatch 时生成，不存在冻结的 matrix digest 或锁定 case count。
+再补充一个用于其余情况的键。**存在 `chain_health.interpair_gap_us`** 标志着两遍链：
+来自单个六事件链的行带有 `chain_health`，但其中只有 `pair_spread_us`，并且这些行的
+`pair_period` 是被一个主机端常数抬高的，而不是一个虽有差异但仍然有效的量，因此
+应将这些行视为有缺陷，而不只是较旧。对于 MoRI 缓冲区模式变更和 NCCL EP
+combine 大小调整，**完全不存在逐行判别字段**。`kernel_generation` 在变更前后
+读数相同，因此对于这两个后端，无法通过任何字段将变更前的行与变更后的行
+区分开来；必须将其从存储中排除，而不是用键来规避。
+
+如果扫描版本以后递增，**请跳过 2，直接使用 3。** 此分支开发期间曾短暂递增到 2，
+留下了标记为 `version: 2` 的存储文档；目前它们之所以不可见，只是
+因为前端读取器仅接受 `[1]`。发布对 2 的支持，会悄然让这批
+开发中期的变动重新以有效数据的形式出现。
+
+下面完整说明 `fp8_consume` 的推导，因为代码现在会指向这里。`dequant` 是一个
+验证通道，而非第二项指标（绝不是扫描轴，也绝不是默认项），因为
+配置不匹配的成本可以从每次运行已经发出的内容中推导出来：
+
+    dequant roundtrip  ~=  roundtrip + stage        (+2.4% .. -0.1%, b200 LL fp8 ladder)
+
+之所以略偏高，是因为链式执行摊薄了启动开销（在整个
+语料库中，`rt/(d+s+c)` 的中位数 = 0.93）。反过来则**不**成立：按 `dequant - stage` 重建 native 时，误差为
+T=1 时 -11.6%、T=64 时 -5%，且直到 T=256 才收敛。这恰恰在标题所
+报告的解码区间内最为严重。因此，应测量 native 并据此推导 dequant，切勿反向操作。该 hatch 可复现
+历史 deepep-v2/uccl-ep 数值以供回归检查（302.0µs，对比运行
+30177021271 中 T=1 时的 302.5µs）。它无法复现 MoRI fp8，因为后者的 stage 现在只转换 dispatch
+所填充的行，也无法复现任何外提前的 BF16 roundtrip。
+
+请将这项开销理解为**每次调用的固定成本，而非与载荷成比例的成本**。在 DeepEP V2 解码中，
+FP8 dispatch 的 p50 减去其 BF16 对照值，在 T=1 时于 h100 上为 65us、b200 上为 59us、b300 上为 27us、
+gb300 上为 57us；直到 T=64，波动都不超过一两微秒，之后开始衰减。到 T=512 时，它在
+h100 和 b300 上略为负值，因为在这些平台上，载荷字节数减半带来的收益足以抵消这项开销且仍有余量。FlashInfer EP 在
+gb300 上承担约 107us 的此类开销（使用其自有编解码器，并且在 FP8 下有第四个分发载荷）。在 T=1 时，FP8 路径移动的字节
+比 BF16 *更少*，所以这是每次调用的工作，而非传输所致；它比融合量化操作自身的
+设备执行时间（每个 SKU 为 1.5-3.6us）高出一个数量级以上：计时窗口在其起始事件之前没有主机
+同步（见下文），因此 T=1 时近乎空闲的流会使主机侧启动开销落入
+该窗口。编译量化操作会降低这项开销，而不是造成它。eager 量化在
+同一窗口内测得 h100 上每次解码分发要差 33-39us，但生产环境只会向
+已经繁忙的流提交一个自定义量化操作，因此 FP8 `normal` 行的小 T 端是该套件给出的最不具
+生产代表性的数值。应在阶梯顶端比较 FP8 和 BF16。
+`low-latency` 行不受影响：根据 API 契约，这些内核要么在内部进行量化，要么接收预量化输入。
+NCCL EP 在本版本中仅支持 BF16，因此其单元格只包含对照值。各后端的
+精度集合位于 `sweep_matrix.py` 的 `BACKEND_PRECISIONS` 中，而且后端绝不会
+为其不支持的精度生成用例。`normal` 模式用例采用
+`layout-and-dispatch-v1` 语义。`low-latency` 用例采用各后端的解码内核语义
+（详见下文）。
+
+- `ep-core`：在工作负载的 token 阶梯上进行均匀路由；对于 `deepseek-v3`，这些阶梯包括解码
+  T=1..512 的 2 的幂，以及预填充 T=1024..8192 的 2 的幂。阶梯因模型而异，并且
+  与工作负载一起保存在 `configs/sweep.json` 中。
+
+后端可以将阶梯上限下调至低于该范围，并且每个被限幅的点都会在产物中报告，
+而不是被静默丢弃。`workload.ladder_measured`、`ladder_dropped` 和 `ladder_cap`
+记录了哪些点已运行、哪些点未运行。DeepEP V2 在 `low-latency` 模式下会预分配固定大小的接收缓冲区，
+因此其阶梯不能超过该缓冲区。二者均为 256，因此解码阶梯会运行到其完整上限，
+仅丢弃 512 点。
+
+该限幅一度是保障正确性的关键措施。DeepEP 的低延迟合并在每个
+Blackwell SKU（B200、GB200 和 GB300，EP8 和 EP16，两种精度，MNNVL 和 RDMA 均如此）的 256 档位上都会产生数据损坏，而
+Hopper 始终正常；该问题以每次调用约 1.5-3.3% 的概率随机发生，表现为一个错误的 token
+行，但其范数仍能匹配到 4 位有效数字。上游 PR #642 使用 CTA 作用域的
+栅栏修复了该问题，确保合并消费者对共享内存的读取在其暂存缓冲区被回收之前完成。我们
+固定的提交是早于该修复的合并前分支头，因此我们将实测阶梯限幅至
+128，直到固定版本移至上游 main。接收缓冲区的大小由常量而非
+`max(ladder)` 确定，因此限幅无法改变内存占用，而该占用同时决定了传输的内存
+流量和 FP8 反量化量。
+
+`sweep_matrix.py` 将请求的 SKU、后端、EP 大小和 token 阶梯具体化为一个
+矩阵文档，然后提取严格的逐分片控制项。`--only-sku`、`--exclude-skus`、
+`--ep-sizes` 和 `--precisions` 用于选择子集。子集会生成更小的矩阵，而不是
+不同的契约。矩阵按每次调度生成。不存在冻结的矩阵摘要，也不存在锁定
+的用例数量。
 
 | 系统 | EP8 | EP16 |
 |---|---|---|
-| H100/H200/B200/B300 | 1x8 NVLink，scale-up | 2x8 NVLink + RDMA，scale-out |
-| MI300X/MI325X/MI355X | 1x8 XGMI，scale-up | 2x8 XGMI + RDMA，scale-out |
-| GB200/GB300 | 2x4 MNNVL，scale-up | 4x4 MNNVL，scale-up |
+| H100/H200/B200/B300 | 1x8 NVLink，纵向扩展 | 2x8 NVLink + RDMA，横向扩展 |
+| MI300X/MI325X/MI355X | 1x8 XGMI，纵向扩展 | 2x8 XGMI + RDMA，横向扩展 |
+| GB200/GB300 | 2x4 MNNVL，纵向扩展 | 4x4 MNNVL，纵向扩展 |
 
-物理 host 数量不定义 scope。两个 GB cell 都留在一个 72-GPU MNNVL scale-up domain 内。
+**虚拟化资源池可能会使横向扩展行测量到的是虚拟机监控程序，而非互连网络。**
+在拓扑完全相同的情况下，h200-dgxc EP16 的跨节点开销约为 b300 或 h100 的三倍，
+流量也完全相同，而其 EP8 行的数据是正确的。性能缺口仅限于跨节点这一跳。它
+每个节点可维持 ~34 GB/s，而标称配置为 8x400G（每个 GPU-NIC 对约 ~4.2 GB/s）；相比之下，裸机
+h100 可达到线速。重新排列 NIC-PE 映射，使每个 rank 与其 socket 本地 NIC 配对，
+并未带来任何变化（478µs，而基线为 480µs），这排除了选择器，并表明
+guest 内的整条 GDR 路径都出现了性能退化。已退役的 b200-dgxc 资源池也呈现出相同的
+形态。在确认 host 的 ACS/IOMMU 配置之前，应将虚拟化资源池的 EP16 行视为硬件性能的下界。
 
-Unsupported 组合会在 matrix 中显式分类，而不是被静默跳过。DeepEP V2 是 PR #605 引入
-的 `ElasticBuffer`，固定包含上游 PR #630 的最小纯 scale-up 修复，以及 PR #640
-排除 NCCL shared-memory mapping 的精确 library matcher。Scale-up 用例请求 NCCL
-Device API LSA，并在 realized LSA team 未覆盖完整 EP world 时 fail closed。x86 EP16
-scale-out 使用 GIN hybrid path，需要两个逻辑 scale-out domain、两个物理 RDMA rank，
-每个 domain 含八个 scale-up rank。GB EP16 仍为 MNNVL scale-up，使用 LSA。MoRI EP8
-在所有 CDNA SKU 上使用直接 `IntraNode` kernel；EP16 使用固定配置的 `InterNodeV1`
-在 2x8 XGMI + RDMA 上运行。UCCL-EP 是 API 完全一致的 DeepEP 替代实现，通过普通
-`libibverbs` 的 CPU-proxy GPUDirect RDMA transport 运行，不依赖 NVSHMEM/IBGDA；
-其 scale-up 为单节点 `cudaIpc` over NVLink/XGMI，因此不使用 MNNVL。NCCL EP 是
-NVIDIA 基于 NCCL Device API 的原生 MoE dispatch/combine，由 `nccl4py` 驱动；
-`normal` 使用 `HIGH_THROUGHPUT` algorithm，其 FLAT `[N, hidden]` receive 与无权重
-rank-sum combine 精确符合 `layout-and-dispatch-v1`。它仅支持 NVIDIA 和 CUDA 13，
-在 H100/H200/B200/B300 上运行 EP8，在 GB200/GB300 上运行 EP8 和 EP16。x86 EP16
-scale-out 在 `nccl_ep.cc` 内发生 fault，因此记为 unsupported coverage row。
+物理 host 数量并不能界定作用域。两个 GB 单元格都仍位于同一个 72-GPU MNNVL 纵向扩展
+域内。
 
-第二种 `low-latency` 模式加入每个 backend 的 decode 优化 kernel。DeepEP 使用旧版
-`deep_ep.Buffer` 低延迟 decode kernel（`low_latency_dispatch`/
-`low_latency_combine`），返回 per-expert padded receive buffer，并在 source-side
-combine 中应用 top-k gate weight。已纳入范围的单节点 EP8 cell 使用节点内 NVLink
-低延迟路径；只有多节点 scale-out EP16 才通过 NVSHMEM/IBGDA 使用 `/dev/gdrdrv`。
-MoRI 使用 `IntraNodeLL`，这是 single-call、纯节点内的 decode kernel，保持与 throughput
-`IntraNode` 相同的按 rank 去重 compact layout 和无权重 combine。低延迟仅作为
-decode-phase addition，其可运行集合由 registry 的 `ll_backends` 逐 cell 控制。当前
-启用 DeepEP V2 EP8（H100/H200/B200）、MoRI EP8（MI300X/MI325X/MI355X）和
-UCCL-EP EP8（H100/H200/B200）。AMD SKU 不启用 UCCL-EP 低延迟 kernel，因为它会在
-AMD CU 数量下触发 warp-group assertion。NCCL EP adapter 虽实现 `LOW_LATENCY`
-algorithm，但当前不在任何 SKU 的 `ll_backends` 中：已发布 wheel 的 signal protocol
-会消费 stale peer signal 并导致 pipeline wedge，见
-[NVIDIA/nccl#2303](https://github.com/NVIDIA/nccl/issues/2303)。某个
-SKU/backend/EP/mode cell 是否被尝试是 capability 事实；其成功与否仅由生成的产物决定。
+不受支持的组合会在矩阵中明确分类，而不是悄无声息地跳过覆盖。DeepEP V2 是由
+PR #605 引入的 `ElasticBuffer`，固定在 upstream main；其中包含该 PR、#630 的
+最小纯纵向扩展修复、排除 NCCL 共享内存映射的 #640 库匹配器，以及
+#642 的低延迟 combine 栅栏。纵向扩展用例
+请求 NCCL Device API LSA，并采用失败即关闭策略，除非实际形成的 LSA team 覆盖完整的 EP world。
+x86 EP16 横向扩展使用带 GIN 的混合路径，并且需要两个逻辑横向扩展域；
+它们由两个物理 RDMA rank 表示，每个域包含八个纵向扩展 rank。GB EP16 仍采用 MNNVL
+纵向扩展并使用 LSA。MoRI EP8 在每个 CDNA SKU 上都使用直接 IntraNode kernel。其 EP16 InterNodeV1 路径已
+配置但不受支持（传输层 combine 损坏，ROCm/mori#475），且绝不会被调度。
+MoRI 以其 MANUAL 启动模式运行，并使用固定的启动配置，因为引擎实际就是这样
+运行的：vLLM 和 SGLang 均未设置 `MORI_EP_LAUNCH_CONFIG_MODE`，且两者都为节点内 kernel 固定 block_num 80、
+rdma_block_num 0 和 `warp_num_per_block` 16；dispatch 和 combine 均如此，
+两者都不传递逐调用覆盖值，并使用外部输入缓冲区。这是 MoRI 的默认值，
+SGLang 会显式设置它。二者被有意一同固定：在 MoRI 的调优表中，combine 的索引键是
+`zero_copy`；外部输入对应大约 16 个 warp，而已注册缓冲区对应 4-8 个，且
+这种不匹配在两个方向上都可测得。在 MI300X、MI325X 和 MI355X 上，
+**在注册缓冲区模式下**，与 8 个 warp 相比，16 个 warp 在 T=128 时的 combine 开销高 +13-18%，在 T=512 时高 +61-78%。
+**在引擎实际运行的外部输入模式下**，同样的 16 个 warp 在 T=128 时以 14-19% 的优势*胜过 8 个 warp*，
+在 T=256 时快 26-27%，并且在包括 T=8192 在内的每个 prefill 档位都快 9-14%。在 T=32 以下，它会慢 0.2-2.5us，
+这是 8 个 warp 领先的唯一范围。所有方案在每个档位都结果正确。使用外部输入缓冲区时，
+内核会自行执行暂存复制，且复制量受接收计数限制，因此 BF16 行会将
+dispatch 输出原样传递，并将 `stage` 声明为显式的不可用标记（百分位数为 null，
+样本数为零）。FP8 行仍会真正执行暂存，以便对接收到的载荷进行反量化。这些数字
+描述的是引擎集成配置，而不是 MoRI 的峰值：其随附的调优表通过按形状设置 block 数和 warp 数，实现了
+更快的 combine，但没有任何引擎会选择这些计数，AUTO 也无法在所有情况下都一致复现
+它们。Gfx950 未提供 IntraNodeLL combine 表，也没有普通模式下
+IntraNode dispatch 的 BF16 规则，因此 AUTO 恰好对这两项采用默认值（使结果取决于固定使用的具体 MoRI
+版本），同时对另外两项进行调优，而这并不能得出一个关于硬件的单一数字。偏离峰值的程度
+取决于架构：在 MI355X 的各种缓冲区模式中，将
+注册模式中被排除的 BF16 stage 加回后，采用 8 个 warp 的注册缓冲区在 T=512 decode 时仍比随附的配对快 15%，
+在 T=8192 prefill 时仍快 8%，但这一结果未能在
+gfx942 上复现，因此对于没有任何引擎会运行的配置，应将 0-15% 视为如实反映情况的范围。低延迟
+方案根本没有可供匹配的引擎集成配置：SGLang 的低延迟路径将 `AsyncLL`
+固定为 8 个 warp，而此套件使用 `IntraNodeLL`（`AsyncLL` 采用分阶段方式，在
+单次调用测试框架下会静默失败），因此其启动配置是主动选择从普通模式元组继承的，而不是
+遵循先例。UCCL-EP 是可直接替换 DeepEP 且 API 完全相同的方案，它保留旧版 `Buffer`
+`dispatch`/`combine`（未加权的 rank 求和），但通过 CPU 代理的 GPUDirect RDMA 在普通
+`libibverbs` 上传输，不使用 NVSHMEM/IBGDA，并通过软件实现消息排序、原子操作和流量控制。其
+scale-up 采用单节点内经由 NVLink/XGMI 的 `cudaIpc`（因此 scale-up 域是一个物理节点，
+绝不是 MNNVL），其 EP16 scale-out 使用与其他后端相同的各 SKU RDMA 通道。NCCL EP
+是 NVIDIA 在 NCCL Device API 上原生实现的 MoE dispatch/combine，通过 `nccl4py`
+绑定驱动。`normal` 模式选择其 `HIGH_THROUGHPUT` 算法；该算法采用 FLAT `[N, hidden]` 接收和
+未加权的 rank 求和 combine，与 `layout-and-dispatch-v1` 完全匹配，因此适用同一个预期结果判定程序。它
+仅支持 NVIDIA 且仅支持 CUDA 13，并在 H100/H200/B200/B300 上运行 EP8 scale-up，在
+GB200/GB300 上还运行 EP8 和 EP16，其中 EP16 保持在 MNNVL scale-up 域内。X86 EP16 scale-out 是不受支持的
+覆盖项；其跨节点 GIN 路径在 RoCE 和 IB 上都会在 `nccl_ep.cc` 内以相同方式发生故障，且这一情况遍及
+四个 SKU。这是 GDAKI 的限制，而不是 fabric 选择方面的限制。FlashInfer EP 是 TensorRT-LLM 的单边 MNNVL `MoeAlltoAll`，其中每个 rank 都会将 token 直接写入各 peer 的工作区窗口，combine 再将其读回，因此不存在 send/recv 配对，也不使用 NVSHMEM。正因如此，它仅支持 GB200/GB300，并在 MNNVL 纵向扩展域内运行 EP8 和 EP16。其 combine 是唯一一处后端累加器精度会改变预期值而非容差的地方：截至 0.6.15，该内核以载荷 dtype 保存其 top-k 累加器，并使用手工展开的成对树对其进行归约，因此每一级都会舍入到 BF16，而预言机精确复现该树，而不是放宽门限来容纳这种差异（0.6.16 将累加器改写为 FP32。适配器会读取已安装的版本并选择匹配的模型）。这些吞吐内核在 `normal` 模式下覆盖完整的 token 阶梯。其 FP8 dispatch 是这里唯一一个可实现、但不在任何已部署路径上的（后端，精度）组合。vLLM 在此传输上仅接受 nvfp4/mxfp8/bf16，因此 `sweep_matrix.py` 的 `OFF_PATH_PRECISIONS` 会将其排除在默认矩阵之外，而生产扫描只会测量引擎能够选择的配置。显式指定该精度（`--precisions fp8`）会将其重新纳入，以便在字节数和块大小匹配时，与 DeepEP V2/UCCL-EP 进行传输对比：这是唯一一处精度过滤器会增加行，而不是只移除行。
 
-## 工作负载身份
+第二种 `low-latency` 模式会加入各后端针对 decode 优化的内核系列。在 DeepEP 上，它会驱动
+旧版 `deep_ep.Buffer` 低延迟 decode 内核（`low_latency_dispatch`/`low_latency_combine`），
+这些内核提供按 expert 填充的接收缓冲区，并在源侧
+combine（weighted-kernel-sum）内应用 top-k gate 权重。对于范围限定为单节点 EP8 的单元，这些内核运行于节点内
+NVLink 低延迟路径（`allow_nvlink_for_low_latency_mode`）上。NVSHMEM/IBGDA（以及因而涉及的 `/dev/gdrdrv`）
+只会在多节点横向扩展（EP16）运行中通过线缆使用，而单节点 EP8 已在
+未安装 `/dev/gdrdrv` 的 H200 上通过验证。在 MoRI 上，它会选择 `IntraNodeLL` 内核，这是一种单次调用、
+纯节点内的 decode 内核，它保持与吞吐 `IntraNode` 内核相同的按 rank 去重的紧凑布局，以及简单的无权重
+rank 求和 combine，因此两者仅在内核类型和时序方面有所不同
+（特意不使用分阶段、经 RDMA 暂存的 `AsyncLL` 内核，因为其独立的接收阶段
+不符合单次调用 dispatch/combine 契约）。低延迟是仅在 decode 阶段增加的能力，
+其可运行集合比吞吐内核的集合更窄，且与之不同，因此它是依据注册表的 `ll_backends` 映射
+逐单元启用的，而不是假定在 `normal` 可运行的任何地方都可用。目前，它
+已为 H100/H200 上 EP8 的 DeepEP V2，以及 B200 上 EP8 和 EP16 的 DeepEP V2 启用（nscale
+裸机池：通过原生 IB rail 使用 IBGDA，并配有 `/dev/gdrdrv`；这是 x86 低延迟横向扩展
+所必需的，而任何虚拟化池都不具备它），也已在 GB200/GB300（MNNVL 纵向扩展域内的 EP16）、MoRI
+EP8（MI300X/MI325X/MI355X）以及仅 H100/H200/B200 上的 UCCL-EP EP8 中启用（旧版
+`Buffer` 低延迟内核在 EP8 下通过 NVLink 运行 `cudaIpc`，而不是 CPU 代理 RDMA 路径，
+因为适配器传入 `is_intranode`，UCCL 因而绝不会启动其代理。AMD SKU 移除了
+LL：上游在我们固定版本前六天将 `kNumMaxTopK` 从 9 -> 16，而由此产生的主机端断言
+在 AMD 的 16 个 warp group 上无法成立），此外还为全部六个 NVIDIA SKU 上的 NCCL EP EP8 启用。其
+`LOW_LATENCY` 算法是源自 DeepEP 的 decode 路径，采用 EXPERT_MAJOR 接收，并使用源侧
+weighted-kernel-sum combine。当所有 LL 分支都因陈旧的 peer 信号而卡死时，这些行曾被移除
+（[NVIDIA/nccl#2303](https://github.com/NVIDIA/nccl/issues/2303)），并在单句柄
+适配器消除导致该问题的别名重叠后恢复。B300 仅将 NCCL EP 作为其唯一的
+低延迟行，而且它是一种 `candidate` 传输，因此该 SKU 不发布任何生产 decode
+覆盖。是否尝试给定的 SKU/backend/EP/mode 单元是一项能力
+事实。是否成功则仅由发出的产物决定。
 
-使用 `configs/sweep.json` 中的 workload seed，在 global token batch 上生成一个
-deterministic workload，并按 source rank 切片。带 key 的 BLAKE2b counter 对
-`(token, slot, attempt, stream)` coordinate 生成逐字节一致的 expert index 和 gate
-weight；在用例成功前，harness 会证明所有 rank 的 realized routing trace 完全一致。
+## 工作负载标识
 
-Routing traffic 区分：
+从工作负载在
+`configs/sweep.json` 中的种子（它是工作负载标识的一部分，并固化到每个已调度案例中）生成覆盖全局 token 批次的一个确定性工作负载，并按
+源 rank 切分。针对（token、slot、attempt、stream）坐标使用带密钥的 BLAKE2b 计数器，可在
+每个运行时上生成逐字节完全相同的专家索引和门控权重，而测试框架会验证
+实际产生的路由跟踪在各 rank 间完全一致，之后案例才可成功。
 
-- token-expert assignment：决定 expert compute load；以及
-- 按 rank 去重的 token payload copy：决定 EP activation traffic。
+路由流量区分：
 
-Adapter 不得自行生成 routing，也不得将两种数量互相解释。
+- token-专家分配，它决定专家计算负载。
+- 经 rank 去重的 token 载荷副本，它决定 EP 激活流量。
+
+适配器不得生成路由，也不得将一个量重新解释为另一个量。
 
 ## 测量
 
-Normal 模式使用 `layout-and-dispatch-v1`：dispatch 计时包含 layout 与通信，combine
-通过无权重 rank-sum path 返回 activation payload。Expert-output staging 位于独立
-combine 计时之外，但包含在成对 roundtrip 中。每个 component 声明 availability、
-origin 和 sample count。仅支持 paired API 时，isolated component 报告 null；
-`isolated_sum` 为派生值。产物记录 mode，使 reader 能分离不同 measurement contract。
+正常模式使用 `layout-and-dispatch-v1`：dispatch 计时包括布局和通信，而
+combine 通过无权重的 rank 求和路径返回激活载荷。专家输出暂存
+既不计入独立的 combine 计时，也不计入实测的配对往返，因此
+每一行中的 `roundtrip` 都表示先 dispatch、后 combine（即传输），而暂存则在其执行设备端工作时作为单独的 `stage`
+分量报告。`CX_FP8_CONSUME=dequant` 验证开关是唯一的
+例外，它有意将转换放回链路内部。
 
-所有被测 component 使用 `configs/sweep.json` 中唯一的固定 timing profile：
+在 FP8 下，应将 `stage` 视为**测试框架的辅助机制，而不是服务栈实际具有的阶段**：它
+把收到的 FP8 载荷转换为 BF16 combine 发送数据，而生产环境绝不会单独执行此操作。在生产环境中，
+FP8 会进入专家 GEMM，该 GEMM 原生读取 FP8 操作数，并产生 BF16 combine 的
+接收数据。本套件测量的是集合通信而非层，因此 `stage` 代替了该 GEMM，
+因此它不计入 `roundtrip`，也正因如此，**不得将 `stage` 累加到总计或
+在后端之间进行比较**：每个适配器转换的数据量各不相同。DeepEP V2 和 UCCL-EP 仅转换
+`normal` 模式下接收到的行，但在 `low-latency` 模式下会转换整个经填充的平面；在该模式下，
+无论令牌数量如何，接收缓冲区均为 `[experts, cap * ranks, hidden]`。MoRI 仅转换
+接收到的行。FlashInfer 仅转换已填充的槽位。唯一*确实*会承担单独物化
+反量化开销的生产路径，是量化格式不匹配时的回退路径（vLLM 会在 `block_k` 与 DeepEP 的
+块大小不一致时进行反量化），这由 `CX_FP8_CONSUME=dequant` 建模。这不是默认行为，因为它
+并非快速路径。
 
-- 256 个 trial x 8 次计时迭代，共 2048 个 observation；
-- 在每个 trial/point 测量每个可用 component 前，执行 32 次同步的完整
-  dispatch-stage-combine warmup；
-- 每个 trial 轮换 component measurement order，并按 trial 轮换 token ladder，使
-  每个 component 均匀出现在所有顺序位置；以及
-- 每次迭代先取跨 rank 最大 latency，再计算 nearest-rank p50/p90/p95/p99。
+应将 `implementation.stage_excluded_from_roundtrip` 理解为“存在执行设备工作的暂存步骤，并且该步骤已被
+外提到链外”，而不是“该行的往返过程不含暂存步骤”。其取值取决于
+后端的 `stage()` 是否实际执行设备工作，因此 `false` 涵盖两种互不相关的情况，而这两种情况由
+`stage` 组件加以区分：**不存在**意味着后端没有任何需要暂存的内容（仅做裸指针
+赋值，NCCL EP 以及所有将接收缓冲区直接交给 combine 的 BF16 行都是如此），
+**与 `false` 同时存在**意味着 `dequant` 这个逃生口把转换重新放回了链内。
+仅凭 `false` 就将其解读为“往返过程包含暂存步骤”，会扣除该行从未付出的成本。每个组件都会声明其
+可用性、来源和样本数。只提供配对测量的 API 会将独立组件报告为 null。
+`isolated_sum` 是派生值。
 
-Roundtrip p99 是主要 latency。Decode 和 prefill 只表示一个 MoE-layer collective
-对应的 serving regime，不改变相同 shape 的 timed primitive。沿 ladder 升序执行时，
-每个 shape 在 correctness check 前会先运行 8 次不计时的完整 roundtrip，使 clock、
-fabric 和 buffer state 稳定。所有计时都在每个 shape warmup 并通过检查后开始。
-Conditioning round 不被测量或输出。
+对于每个带有该值的行，主延迟指标都是**链式配对周期**（`components.pair_period`，定义见下文的链式
+配对周期一节）；对于在该字段出现之前测量的行，则采用每次迭代中跨 rank 的 `roundtrip` MAX 的 p99
+。这一切换上线时处于**搁置**状态；在下文所述的
+每对包含六个事件的链（其内部记录会使小 T 的周期
+在整个机群范围内虚高）被双遍链取代；该切换于 2026-08-06 解除搁置，此前 b200、h200
+和 gb200 的手工参考值已与双遍机群产物对照确认（运行 31092783122 和
+31089556516）。无论采用哪种方式，`p50` 和 `p99` 都会
+被输出，且 `summarize.py` 会打印二者。MAX 是 fresh-entry 系列采用的归约方式，因为
+一个层要等到最慢的 rank 完成后才算完成，所以 MAX 是完成成本，并且会将
+rank 间的进入时间错位计入各 rank 进入时间不一致的那个组件。该错位取决于
+代码路径和精度二者，而不只取决于机群：在完全相同的 h200 低延迟解码单元上，
+在 BF16 下，deepep-v2 和 uccl-ep 的每次迭代跨度为 ~9.3 us（二者共享旧版
+`Buffer` 路径），相比之下 nccl-ep 为 ~2.6 us；在 FP8 下，这两者均收敛至 ~2.8 us，
+其中内核内量化使较重的分发操作自行对齐各 rank。该项无法
+以任何有原则依据的方式扣除，因此仅使用 MAX 会让某些行比其他行受到更大惩罚。
 
-Logical payload bandwidth 定义为：
+因此，每一行还包含 `cross_rank_min_us`（对相同迭代使用 MIN 进行归约所得的、排除偏斜后的下限）和
+`cross_rank_spread_us`（每次迭代的 MAX 减去 MIN）。应将 MAX 和 MIN 视为一个
+区间：如果两个单元格的 MAX 差值小于较大竞争者的 spread，则数据无法
+区分二者。按往返 p50 排名，并且仅当 MAX 和 MIN 对排序结论一致时才判定胜者。不要
+依据多节点解码单元格的 MAX p99 排名，因为它主要由最慢 rank 的停顿决定，
+而非传输；其旁边的 MIN p99 才是同步成本的尾部。孤立组件
+会继承前一操作在各 rank 上的退出错位，因此应将其视为残余等待诊断指标，
+而非单次操作成本。配对往返才是可比较的量。
+
+### 链式配对周期
+
+以上所有内容衡量的都是**全新进入**：每个计时窗口前后都会排空，因此每个
+样本都从空闲流水线开始，各 rank 会在每次采样前重新产生错位。解码循环从不
+停止，而它为每个 MoE 层付出的代价是流水线的稳态**周期**。因此，每一行
+都包含链式指标族，由 `benchmark_chain` 测量：连续发出分发→合并操作对，
+CUDA 事件在流上入队，并且**循环内部不进行主机同步**；
+最前面的 `chain_drop` (16) 个操作对作为流水线填充而丢弃，并在每个
+点上汇总 `chain_trials` (4) 次试验，采用与 Pass 2 其余部分相同的轮换阶梯顺序。配对方式与
+`run_roundtrip` 完全相同（分发、经过暂存的合并输入（或在
+`CX_FP8_CONSUME=dequant` 这一应急开关下使用内联 `stage`），然后合并），因此配对 API 后端仍遵守约定，并且
+`pair_period` 按照与 `roundtrip` 相同的规则，不计入专家输出暂存。
+
+每次试验运行**两条同级链**，每条包含 `chain_iters` (128) 个操作对，因为统计结果绝不能
+带有用于收集这些统计结果的插桩。第一版仅运行一条链，每个操作对调用六次
+`record()`。只要设备排空速度快于主机入队速度（阶梯的最底部），
+每个事件都会按发出顺序执行，操作对窗口退化为主机经过时间，
+而四条内部记录加上衔接开销都被计入了所发布的周期。机群先于性能分析器暴露了这一点：
+在所有供应商和互连架构上，周期减去下限之和的差值都同时保持在大致不随 T 变化的 10–30µs
+（这是主机常量，而非传输常量），使 T=1 的周期膨胀了 20–38%。因此，首先运行一条
+**下限链**，其中只携带四个操作窗口事件；随后运行一条**周期链**，
+其中只携带外层的一对事件，且其两次集合通信之间没有任何内容：两条记录的主机
+开销落在这对事件之间的间隙中、窗口之外，因此该周期包含未插桩的
+调用方所付出的开销。（与任何 eager 调用方一样，eager 模式的启动下限仍然存在，但 CUDA graphs 解码循环
+每对操作付出的主机开销比任何 eager 测试框架都少。）
+
+这两条链发布五项统计数据，且仅发布这五项：
+
+- `components.pair_period`（来源为 `chained-median`）是周期链测得的每对周期，
+  通过 MEDIAN 在各 rank 间归约。对于已排空的组件，MAX 是正确的（一层要等其
+  最慢的 rank 完成），但周期是一种**速率**：集合通信将每个 rank 锁相到同一
+  节拍，而 MAX 会把偶然卡顿的那个 rank 发布为流水线的速度。
+- `chain_floor_us.dispatch` / `.combine`（来源为 `chained-cross-rank-min`）分别是下限链中
+  各操作的窗口，并通过 MIN 在各 rank 间归约：最后进入一次集合通信的 rank 等待时间最短，因此
+  它的窗口就是该操作的下限；该值与性能分析器测得的内核时间相差约 10%，因而可免费替代 Kineto。
+  应将下限与周期之比理解为传输占比，而不是必须闭合为零的恒等式。
+  `period − Σfloors` 是一个真实量，其正负号各有含义，两种符号都不表示错误：
+  - **正值**是 MIN 有意剔除的每对操作的 rank 间等待。在某个后端
+    以同步为主导时，它可与下限之和相当，并且相对于 T 保持*不变*；例如 gb200
+    flashinfer-ep 常规解码（运行 31089556516）在每个阶梯上均保持约 70µs bf16 / 约 100µs fp8，
+    到 T=512 时以及在 prefill 中，随着下限增长并将其吞没，它便消失。这是 `period = max(sync
+    budget, work)`，而非插桩效应。`pair_spread_us` 无法显示这一点（2.7–8.5µs，而间隙为
+    62–107µs），因为周期保持不变，而等待会在操作窗口之间迁移。这正是
+    下文禁止使用链式每操作中位数的同一种稳态错位。
+  - **负值**是下限链自身每对操作四条记录的主机开销（约 10–12µs）造成的膨胀，
+    凡是设备快于主机之处，*它的*窗口都会因此变大：这正是双链拆分
+    从周期中剔除的效应；它仍存在于下限中，但无害（gb200/h200 fp8 LL，运行
+    31089556516）。这不是重叠，也不是跨链稳定过程。
+
+  不要把较大的正残差解读为六事件缺陷再次出现。该缺陷是一个
+  近似与 T 无关的主机端常量，会同时出现在*每个厂商和每种互连网络上*，并计入
+  `interpair_gap_us`。由同步主导的残差是后端特有的，并且会使该间隔保持较小。
+- `chain_health.pair_spread_us` 测量每次迭代中该配对的跨 rank 最大值减最小值。它是中位数确实有意义的*证明*。
+  若它相对于 `pair_period` 较大，则意味着存在被限速或较慢的 rank，并且
+  根本不应将该点解读为稳态周期。
+- `chain_health.interpair_gap_us` 是起始时间间中位数减去配对窗口中位数，每次
+  试验测量一次：即已发布窗口之外的每对开销（测试框架自身的两次 `record()` 调用
+  加上任何配对间停顿），也是产物内针对上述六事件缺陷的回归防护
+  指标。
+- `chain_health.settle_drift_us` 测量周期中位数的后半段减前半段，每次试验测量一次，
+  保留符号，并取跨 rank 幅值最大者。`chain_drop` *假定*链在保留的
+  配对之前已经稳定。这就是证明；未收敛的链（或在链执行过程中降频的设备）
+  会发布其漂移，而不是一个看起来很干净的周期。
+
+**绝不发布链式逐操作中位数和 p99。**在没有主机同步的情况下，各 rank 到达
+每次集合操作的时间略有不同，由此产生的等待会落入某个给定 rank 碰巧发生阻塞的
+操作窗口中。这种落点对每个 rank 而言是稳定的（因此某个 rank 的逐操作数值看起来干净且
+可信），但在各 rank 之间是任意的：rank 3 的 dispatch 偏长之处，恰恰就是 rank 5 的 combine 偏长之处，
+而且在相同配置的多次运行之间呈双稳态；与此同时，总和（即配对周期）
+保持不变。链式逐操作中位数衡量的是该次运行中等待落在何处，而不是该
+操作的开销。跨 rank MIN 是唯一能消除这种等待的归约方式，因此会发布下界，
+而不发布中位数。链式窗口的 p99 会通过尾部把同样的噪声重新混入
+其中。
+
+fresh-entry 系列的含义完全不变：`components.roundtrip`、`dispatch`、`combine`、
+`stage`、`isolated_sum`、`cross_rank_min_us` 和 `cross_rank_spread_us` 仍按一贯方式测量并归约，
+采用相同的 256×8 采样，并且没有任何已存储行被重新释义或重新测量。一个
+消费端以是否存在 `components.pair_period` 为判据。缺少该字段的行早于该链式机制。
+绝不要根据主列将链式单元格与链式机制引入前的单元格进行排名比较。当二者同时出现在表中时，`summarize.py` 会为
+该表添加脚注。
+
+**发布的周期始终只有一种含义：自由运行。** 该链式机制允许各 rank 最多漂移
+约一个迭代；只有接收平面能够容忍这种漂移时，这才是合理的：每个后端要么
+按每次 dispatch 实施双缓冲并依契约强制严格配对，要么在可复用
+句柄上完成每个操作；而 DeepEP V2 的 **normal** 模式（唯一真正未经审计的单元格）则通过以下配置进行了人工测试：
+256 对未同步配对，T=128、EP8+EP16、两种精度（2026-08-06，固定于 `01dc3aaa`，
+使用当时 dgxc 池基于 RoCE 的混合 GIN）：全部通过，输出均为有限值，计时输入未发生变化，
+各 rank 的周期一致性误差在 1µs 以内，而且链式与同步式之间的差距正是本
+节所讨论效应的量级（EP8：BF16 为 105.4 vs 125.4µs，FP8 为 216.6 vs 272.3µs；EP16 则为 838 vs 863µs 和 820 vs
+897µs）。无法自由运行的后端应先修复，而不应作为测量变体：在各配对之间重新对齐
+rank 会额外增加约 ~10µs，并消除该测量旨在
+捕获的跨配对重叠。这是一个定义不同的量，绝不能与自由运行
+周期共用一列。
+
+有一个后端的计时窗口有意省略了其他后端需要支付的一项成本。nccl-ep 使用
+`ncclEpUpdateHandle` 绑定路由；这是一个集合操作，其成本随组的 token 容量而非
+token 数量扩展，因此若按每次迭代计入该成本，就会把一个与阶梯最大值成比例的项引入 dispatch。
+这与过去将 HT 的 combine 输入尺寸设为阶梯最大值时归入 combine 的伪影相同。
+该操作在不计时的预热期间完成绑定，与 NVIDIA 自己的 `ep_bench` 做法一致（CUDA 事件仅包围 dispatch
+和 combine，句柄更新位于循环之外）。低延迟模式没有任何需要排除的内容：
+`ncclEpUpdateHandle` 会立即返回，内核则在计时范围内的
+dispatch 中读取缓存的路由。其他所有后端的布局成本都随 token 数量扩展，因此应计入窗口。uccl-ep
+在 dispatch 内部调用 `get_dispatch_layout`，而 deepep-v2、MoRI 和 FlashInfer 则在每次
+调用时传入路由。
+
+该产物会记录模式，以便读者将不同的测量契约明确区分开来。
+
+每个被测组件都采用一套固定的计时配置，该配置在 `configs/sweep.json` 中一次性定义
+并固化到每个计划执行的用例中：
+
+- 256 次试验 x 8 次计时迭代 = 新入口系列的 2048 个观测值。
+- 4 次链式试验 x（128 个自由运行的操作对 -
+为填满流水线而舍弃 16 个）= 448 个观测值，用于
+  操作对周期，另有 448 个用于操作下限；每次试验都会运行两条同源链
+  （先测下限，再测精简的周期链）。试验次数少于新入口系列，
+  因为一次调用已经会产生 128 个操作对，若要与其试验次数匹配，就会成倍增加该环节的实际耗时，
+  却无法提升收敛性。
+- 在每个试验/点上，每个可用的被测组件之前进行 32 次同步的完整分派-阶段-合并预热，
+  并在每次链式试验之前也进行同样的预热。
+- 每次试验都会轮换组件测量顺序（`trial_order`），使每个计时组件都能占据
+  序列中的每个位置；这一过程基于每次试验都会轮换的 token 阶梯，而链式试验
+  也以相同方式轮换该阶梯。
+- 先取每次迭代在所有 rank 中的最大延迟，再使用最近秩法计算 p50/p90/p95/p99（链式
+  系列则按中位数和最小值归约，如“链式操作对周期”中所述）。
+
+`measurement.sampling` 包含该配置的两部分，因为仅凭 `sample_count` 无法
+反向分解出这两部分，而且 128x4 链与 512x1 链并不是同一种测量。
+
+当某行提供链式操作对周期时，它就是首要延迟指标；否则，首要指标是实测往返
+p99。解码和预填充标识的是一个 MoE 层集合通信所代表的服务工况。
+在其他方面形状相同时，它们不会改变计时的原语。沿阶梯上行时，每个被测形状都会用 8 次不计时的
+完整往返进行状态调节（使时钟、互连网络和缓冲区状态稳定），然后才进行正确性检查。
+所有计时均在每个形状完成预热和检查后进行。状态调节轮次绝不会
+被计时或输出。
+
+将这些数值与供应商表格中的数值进行比较并非同口径比较，而且差异方向是可知的。
+这里的每个样本都是一次 eager 模式的逐调用测量，其中包括内核启动开销以及
+跨 rank 进入时间偏差，并使用 MAX 在各 rank 间归约。供应商针对这些
+相同内核发布的微基准采用了不同的计时方式：仅通过性能分析器对指定内核计时（DeepEP、UCCL 低延迟）、
+重放 CUDA 图（MoRI）、对各 rank 取平均而非取最大值（全部），以及消除
+进入时间偏差，方法是在迭代前休眠或使用摊销屏障（DeepEP、MoRI）；此外还会报告
+配置扫描中的最佳结果（DeepEP V1、MoRI）。预计我们的醒目结果读数大致会高出 5-10%，相比的是这样一份
+基于健康互连的表格。`cross_rank_min_us` 是应放在此类表格旁逐行对照的数值。
+如果存在同类可比项，我们都能持平或胜出：排除偏差后的 MoRI 分发耗时为
+MoRI 自带调优配置在相同形状和字节数下最佳结果的 0.96x；B300 上的 DeepEP V2
+在 3% 以内复现了 DeepEP 已发布的 8x2 数值，而 FlashInfer EP 与 NVIDIA 已发布的
+单边内核在八个按字节归一化的点上均相差不超过 4%。
+
+逻辑载荷带宽为：
 
 `logical_payload_bytes / measured_latency_seconds`
 
-Payload byte 使用按 rank 去重的 token-rank activation，不包含 expert metadata、padding
-和 backend buffer capacity。BF16 每个值为 2 byte，不带 scale payload；FP8 dispatch
-每个值为 1 byte，DeepEP 和 UCCL-EP 的 blockwise codec 还包含每 128 block 的 FP32
-scale，MoRI 的普通 e4m3 cast 不包含；combine 始终为 BF16。因此 dispatch 与 combine
-方向可能具有不同 byte count，roundtrip 为对应字段之和。该按 rank 去重计数对 normal
-layout 是精确值；low-latency layout 按 `(token, expert)` assignment 发送，因此当同一
-token 的多个 expert 位于相同 destination rank 时，logical count 是 kernel 实际移动
-byte 的下界。主要指标 latency 直接测量，不受此影响。若没有定义 primitive model 或
-transport counter，不输出 algorithm bandwidth、bus bandwidth、wire utilization 或
-physical-link utilization。Logical bandwidth 不得标记为 physical bandwidth。
-Payload 和 token rate 命名为 `rate_at_latency_percentile`，即 byte 或 token 除以匹配的
-latency percentile；它们是 p99 latency 下的 lower-tail service rate，不是倒数分布的
-p99 percentile。
+载荷字节数采用按 rank 去重的 token-rank 激活量，不包括专家元数据、
+填充和后端缓冲区容量。BF16 的每个值传输 2 字节，且无缩放因子载荷。FP8
+分发的每个值传输 1 字节，此外，此处每种分块编解码器还会为每个 128 元素块传输 FP32 缩放因子（
+DeepEP V2、UCCL-EP 和 FlashInfer EP，
+其中 FlashInfer EP 将这些缩放因子作为第四个分发载荷携带），而
+MoRI 的普通 e4m3 转换不携带缩放因子；但合并仍使用 BF16，因此分发和合并方向可能具有
+不同的字节数，往返字节数是二者逐字段之和。按 rank 去重的计数对于
+普通模式布局是精确的；对于按 rank 去重的低延迟内核（MoRI 的
+`IntraNodeLL`，其合并是跨 rank 的未加权求和）也是精确的。那些在合并内应用 top-k
+权重的低延迟内核则会为每个 (token, expert) 分配发送一份副本，而不是为每个
+(token, rank) 发送一份；因此，如果某个 token 的专家共享同一个目标 rank，这一逻辑计数就是这些内核实际传输字节数的下界。
+每一行都会在 `logical_copies` 中说明其采用的口径，因此这两种口径绝不会被悄然混用。延迟（醒目指标）是
+直接测得的，不受此影响。在没有已定义的原语模型或
+传输计数器时，不会输出算法带宽、总线带宽、线路利用率和物理链路利用率。
+绝不能将逻辑带宽标为物理带宽。载荷和 token
+速率命名为 `rate_at_latency_percentile`：字节数或 token 数除以相应的延迟
+百分位数。它们是对应 p99 延迟的下尾服务速率，而不是取倒数后的
+速率分布的 p99 百分位数。
 
 ## 正确性
 
-独立于实现的 oracle 使用 expert-specific deterministic transform，避免错误 expert
-routing 通过 identity roundtrip。它对每个 rank 和 point 检查：
+一个独立于实现的预言机采用专家专用的确定性变换，使错误的专家
+路由无法通过恒等往返验证。对于每个 rank 和测试点，它都会验证：
 
-1. destination rank/expert、source token、multiplicity、gate weight 和 receive count；
-2. 计时前的 dispatched payload 与 metadata；
-3. 计时前的 combined output；
-4. 所有 timed sample 中语义 input 未被修改；以及
-5. 计时后的 dispatched payload/metadata 与 combined output。
+1. 目标 rank/专家、源 token、重数、门控权重和接收计数。
+2. 计时前已分派的载荷和元数据。
+3. 计时前的合并输出。
+4. 所有计时样本中的语义输入均保持不变。
+5. 计时后再次检查已分派的载荷/元数据和合并输出。
+6. 每次链试验检查一次**自由运行链自身的最终合并输出**，将其与一个
+   通过完全相同的 dispatch→combine 路径执行的已排空调用对进行比较。
+7. 再针对自由运行链遗留的状态执行一次与 2-5 相同的完整检查。
 
-Normal-mode adapter 使用仅 activation、无权重的 rank-sum combine。Oracle 先构建每个
-rank 的 gate-weighted expert aggregate，再从实际通信的值推导 expected combine，
-重现两级 reduction：destination rank 将 FP32 aggregate 转为 payload dtype（BF16）；
-共享一个 scale-up domain 的 rank 在 FP32 中归约；每个 domain 将 aggregate 转为 BF16
-后再发送到 scale-out。可完全放入一个 scale-up domain 的 group（`ep_size <=
-scale_up_domain`，即所有 EP8 与 MNNVL EP16）只有一个 domain，不产生 scale-out
-rounding；多节点 RoCE EP16 每个 node 携带一个 BF16 partial。对 per-domain cast 的建模
-使最大逐元素相对误差 gate 能稳定保持低于 `8 * 2^-8`，分母下限为 0.02。
+检查 6 和 7 之所以存在，是因为检查 2-5 始终只能看到已排空的调用：若没有它们，主指标
+`pair_period` 就会来自预言机从未检查过的运行状态，而一个在排空时传输
+正确、但在背靠背调用对下会损坏数据的后端，会成为该套件中最快的单元格。
+它们回答的是不同问题。检查 6 是运行状态 A/B 对照，而不是预言机：在每次
+链试验结束时的同步操作之后、所有计时窗口之外，链的最后一个合并输出
+会逐元素地（采用预言机的容差，而非按位相等，因为并不
+要求 combine 内核具有顺序确定性）与通过同一代码路径新执行的已排空调用对进行比较，因此
+它能捕获链在自身结果中造成的数据损坏。检查 7 会重新运行完整的专家预言机
+（在最后一次试验之后，基于已进入稳定状态的通信器；`benchmark_chain` 结束时已同步），因此它
+能捕获链破坏并留给任何后续运行的状态。链内部的调用对按照
+设计不进行验证：每个调用对都会覆盖其前一个调用对的输出，而保留或归约每个输出会
+在计时循环中加入设备端工作（或约 ~O(iters × T × hidden) 的内存），而该链存在的目的就是让这些循环保持
+无异常。仅限于内部配对、且到最后一对时自行恢复的缺陷，不在本套件的
+证据覆盖范围内。检查 6 按行报告为 `correctness.chain_last_output_passed`（在各次
+试验间取 AND），检查 7 报告为 `correctness.post_chain_state_passed`。检查 7 **会纳入
+`correctness.passed`**，因此它一旦失败，该测试支路就会失败，与任何其他判定器失败完全一样。
 
-Low-latency adapter 使用 source-side gate-weighted combine：kernel 将每个 expert 返回
-message 乘以该 assignment 的 top-k weight，因此 adapter stage 未加权的 per-expert
-transform，而专用 per-`(source, expert)`-slot oracle 将预期 combine 推导为 per-expert
-BF16 message 的 gate-scaled sum。由于低延迟 kernel 在 source rank 归约，不存在
-per-domain intermediate。Delivered assignment multiset 和 per-expert count 会与 routing
-trace 对比。在 FP8 dispatch 下，oracle 在 dispatched-payload compare 和 combine
-expectation 前对语义 payload 应用 backend 的精确 per-token cast round-trip，因此
-payload match 保持 bit-exact，使用同一 combine gate。任何 rank 或 point 失败都会使结果
-中的用例不合格。由于 native receive slot 可非确定性分配，physical receive order 不被视为
+检查 6 **仅在链逐对执行暂存的位置起门控作用**，其他位置报告为 `null`。该
+边界是实测的，而非假定的。凡是 `stage_excluded_from_roundtrip` 成立之处（默认包括每个 FP8
+适配器，因为 `stage_device_work` *就是* FP8 标志），链都会将暂存提升到
+计时循环之外，捕获一次预热分派的替代物，并对全部 128 对重复使用。这样，无论是
+链的最终合并，还是已排空的参考，所消费的输入都不与其各自的
+分派匹配，因此它们是两个以不同方式错配的配对，没有任何理由要求二者一致。
+
+这组 A/B 对照在 h100/deepep-v2/EP8 上运行，除是否提升暂存外，其他各方面均完全相同：
+
+| 暂存方式 | `chain_last_output_error` | 与 `COMBINE_REL_TOL` 的比较 |
+|---|--:|--:|
+| 提升至循环外（`fp8_consume=native`） | 31 – 93 | **1000× – 2966×** |
+| 逐对执行（`fp8_consume=dequant`） | 每一档均为 `0.0` | 位级完全相同 |
+
+在 `normal` 和 `low-latency` **两种**模式下（运行 31180411148、31185184372、31185233991），将这组 A/B 结果与
+值为 `0.0` 的 BF16 对照进行比较；之所以如此，是因为 BF16 从不提升暂存。因此，这一差异是
+提升暂存造成的伪影，而非传输缺陷：在提升暂存时仍以此作为门控，会在整个机群范围内将所有 FP8 测试支路标红，只因为
+测试工具刻意执行了这种行为。
+
+最先尝试的是把链的已暂存输入传给已排空的配对，但这*并不*足够。这样做
+会让二者共享一个输入，但这个共享输入与二者的分派都不匹配。只有逐对
+执行暂存，才能使两种执行方式具备可比性。
+
+该检查仅在确有意义的地方保持其约束力：每一行 BF16，以及任何通过
+`dequant` 逃生通道运行的 FP8 行。这里的 `null` 表示根本没有提出这个问题，绝不表示某项比较已经运行并且
+失败。如果将来要移动这一边界，应根据实测量值来移动：仅凭判定结果
+一天之内就导致了两次错误决策，而每次都是一个探针中的数值澄清了问题。
+
+空值留下的未覆盖区域是三个条件的交集：一种仅在自由运行配对下才会显现的损坏
+（排空式预言机因运行机制而无法检测），不会留下任何状态
+（链后预言机无法检测），并且存在于 BF16 同级行不会执行的路径中（其
+仍在把关的检查无法检测）。只要未同时满足这三个条件，仍会有一道门变红。DeepEP
+低延迟路径上 256 级的损坏会影响两种精度，因此其 BF16 行如今会将
+`chain_last_output_passed` 标红，而卡死则会触发逐用例的挂起防护。请注意，上提后的链
+也绝不会使用自身接收到的 FP8 数据，因此该暴露面既涵盖分发侧损坏，也涵盖
+合并侧损坏；而 `chain_health` 是一致性防护，不是工作量防护：若某种运行机制缺陷
+一致地缩短合并过程，就会发布一个较短周期，且没有任何仍有效的检查能与之矛盾。用于探测该
+交集的常设探针是 `dequant` 通道。`CX_FP8_CONSUME=dequant` 会暂存来自每个配对自身
+分发的数据，从而在 FP8 自身的自由运行配对上恢复此项检查。每当某个
+FP8 链式周期发生了其 BF16 同级项未发生的变化，以及在首次发布新的
+FP8 后端之前，都应运行一次。flashinfer-ep 在 BF16 下同样会进行上提（其暂存阶段是工作区暂存副本），因此其
+各行在每种精度下都是空值，该通道也无法覆盖它；其覆盖仍是一个待解决的
+后续事项。
+
+检查 6 还会发布 `correctness.chain_last_output_error`，即链式与排空式结果之间最差的
+相对误差，并取跨 rank 的 MAX，**无论判定是否通过都会报告**。应先读取该值，再
+读取判定结果。该检查假定运行机制缺陷造成的误差会比
+`COMBINE_REL_TOL` 高出若干个数量级，而普通的内核非确定性误差则远在其范围之内；这一假定
+并非毫无代价：FlashInfer EP 使用载荷 dtype（BF16 槽位树）而非
+FP32 来累加其合并结果，因此在大型接收平面上的舍入误差远比以
+FP32 执行归约的后端粗糙。仅凭判定结果无法区分“传输损坏了它”和“此容差对于
+这个累加器而言过紧”，而两者需要采取截然相反的应对措施。量值才是
+判别依据。若报告失败时未提供该值，就不应将其解读为损坏的证据。
+（`post_chain_state_passed` 之前以 `chain_regime_passed` 的名称发布，该名称
+言过其实。新的链后预言机证明的是状态，而非链的输出。来自
+较旧的测试框架仍沿用旧名称，其中 `null` 表示该链从未运行。现在必须预先提供经过验证的链
+预算，因此在新产物中，`post_chain_state_passed` 始终是布尔值。`chain_last_output_passed` 则是
+上述单独描述的情形；在链将暂存过程上提的任何情况下，它都可以合理地为 `null`
+，这包括除 `dequant` 例外路径之外的每个 FP8 行。)
+
+普通模式适配器采用仅使用激活值、不加权的秩求和合并。预言机先构建每个秩的
+门控权重加权专家聚合结果，再执行合并，并根据实际传输的值推导预期合并结果，
+从而复现两级归约：每个目标秩都将其 FP32 聚合结果转换为载荷数据类型（BF16），
+与适配器的做法完全一致。共享同一纵向扩展域（NVLink/MNNVL）的秩
+以 FP32 进行归约，而每个域都会将其聚合结果转换为 BF16 后再进行横向扩展发送，
+之后才对这些部分结果求和。能容纳在一个纵向扩展域中的组（`ep_size <=
+scale_up_domain`，包括所有 EP8 情形和 MNNVL EP16 情形）只有一个域，因此不存在横向扩展
+舍入。多节点 RoCE EP16 组的每个节点都承载一个 BF16 部分结果。正是对这种逐域
+转换进行建模，才使严格阈值得以保持（最大逐元素相对误差（分母下限钳制为 0.02）
+低于 `8 * 2^-8`，即残余的累加顺序不确定性），并且在纵向扩展和横向扩展拓扑中
+均同样成立（若省略该转换，多节点 EP16 的偏差会达到约 0.048，高于该阈值）。
+
+低延迟适配器则采用源端门控权重加权合并：内核将每个
+专家返回的消息乘以该分配对应的 top-k 权重，因此适配器暂存未经加权的
+逐专家变换，并由专用的逐（源，专家）槽位预言机将预期合并结果推导为
+经过门控缩放的逐专家 BF16 消息之和；由于低延迟
+内核在源秩进行归约，因此不存在逐域中间结果。交付的（源，专家）分配多重集和逐专家
+计数都会对照路由跟踪进行检查，并应用同一个严格的合并阈值。在 FP8
+分发下，预言机会先对其语义载荷应用后端逐 token 的精确类型转换往返，然后才进行
+已分发载荷比较和此合并预期值计算，因此载荷匹配保持逐位精确，并且
+同一个严格阈值依然成立。量化会被建模，而不是被吸收到更宽松的容差中。这是一个
+正确性阈值，而不是传输误差的估计。任何秩或测点失败，都会使该用例在所写入的结果中被判定为不合格。
+分发前后的行为会对照规范的源 token 元数据和预期输出进行检查。
+原生接收槽位可能以非确定性方式分配，因此物理接收顺序不会被视为
 正确性属性。
 
 ## 结果产物
 
-每个 raw case 文档包含 `record_type: "case-attempt"` 和单一 `version`，并包含：
+一份原始用例文档带有 `record_type: "case-attempt"`、唯一的 `version` 以及一个
+`generated_at` 时间戳，并包含：
 
-- `identity`：`case_id`、`attempt_ordinal`、`case_factors`（SKU 与调度用例，包括
-  backend、EP size、mode、precision、phase、suite、workload 和 topology coordinate）
-  及 `allocation_factors`（run id、run attempt、source SHA）；
-- `workload`：`cross_rank_consistent`，表示 routing trace 是否已证明跨 rank 一致；
-- `measurement`：dispatch/combine dtype、semantics、`sampling` 和 per-point `rows`；
-- `implementation`：backend name 与 kernel generation；
-- `topology`：请求的 SKU/product、placement、node、scale-up domain、transport 和
-  world size；
-- `provenance`：mounted image tag 与 source SHA；以及
-- `outcome`：`status`（`success` 或 `invalid`）与 `reasons`。
+- `identity`：`case_id`、`attempt_ordinal`、`case_factors`（SKU 和已调度的用例，包括后端、
+  EP 大小、模式、精度、阶段、套件、工作负载和拓扑坐标），以及
+  `allocation_factors`（运行 ID、运行尝试、源 SHA）。
+- `workload`：`cross_rank_consistent`，表示是否已证明路由跟踪在各 rank 间完全相同。
+- `measurement`：派发/合并数据类型（实际采用的线上格式，其中合并始终为 BF16，而派发为
+  BF16 或该 SKU 的 FP8 格式）及语义、`payload_unit`（`token-rank`）、`sampling`，以及
+  每个测量点的 `rows`。
+- `implementation`：后端名称、内核代际和 `maturity`，后者表示生产级
+  推理引擎目前能否选择此传输（`production` = 由 vLLM 的
+  `--all2all-backend` 或 SGLang 的 `--moe-a2a-backend` 提供，而 `candidate` = 我们进行
+  基准测试的真实传输，但没有引擎为其提供选择器，因此其数据描述的是库本身，
+  而非可部署的配置）。注册表的 `backend_maturity` 中也包含同一映射。它还
+  带有 `fp8_consume`（链式往返所建模的 FP8 消费路径（见上文））、
+  `combine_reduction` 和 `library_version`（预言机要求内核遵循的归约，以及
+  选择该归约的已安装库），还有两个代际判别字段：
+  `stage_excluded_from_roundtrip`（`roundtrip` 是否排除专家输出暂存，已在
+  上文讨论）和 `chained_period`（本文档的行是否包含链式系列）。
+- `topology`：请求的 SKU/产品、放置方式、`gpus_per_node`、节点、纵向扩展域、`scope`、
+  `topology_class`、全局规模，以及三个不同的传输字段：`scale_up_transport` 和
+  `scale_out_transport`（各组成部分），再加上 `transport`，即将它们合并
+  为一个字符串的派生摘要（仅纵向扩展时为 `nvlink`，用例一旦横向扩展则为 `nvlink-rdma`）。
+- `runtime`：实际使用的软件栈、`vendor`、`framework`（torch 版本）、
+  `accelerator_runtime`（构建 torch 时所针对的 CUDA 或 HIP 版本），以及
+  `collective_library`（`nccl`/`rccl` 及实际加载到进程中的版本）。
+- `provenance`：已挂载的镜像标签和源 SHA，以及
+- `outcome`：`status`（`success` 或 `invalid`）和 `reasons`。
 
-Runtime `vendor` 来自 registry metadata，而不是由 CUDA/HIP 推断。它接受任意规范化的
-vendor identifier；独立的 `runtime` registry 字段选择当前已实现的 CUDA 或 HIP 执行
-路径。这样 private 的非 AMD/NVIDIA 系统可以保留正确的结果身份，同时不会假装新的
-accelerator runtime 能复用不兼容的 backend 或 launcher。
+每个 `rows` 条目都包含测量点延迟（新条目的 `components`，以及链式测量的
+`components.pair_period`、`chain_floor_us` 和 `chain_health`（参见“链式配对周期”））、字节
+计量、令牌速率、正确性、负载和扇出，而
+每个测量点的统计信息均原位汇总，不会作为单独的文档发出。每个已下发的
+用例都只写入这一份原始结果文档，而不受支持或从未运行的单元格不会生成
+合成记录。
 
-每个 `rows` entry 包含 point latency、byte accounting、token rate、correctness、load
-和 fanout；per-point statistic 在原位汇总，不拆成单独文档。每个 dispatched case 精确写入
-一个 raw result document；unsupported 或从未运行的 cell 不生成 synthetic record。
+## 标识
 
-## 身份
+标识符是可读的因子字符串：
 
-Identifier 是可读的 factor string：
+- `case_id`：`{sku}-{backend}-{workload}-{mode}-{phase}-ep{ep}-{routing}-{precision}`，每个因子均
+  经过 slug 规范化，并且
+- `attempt_ordinal`：用于区分同一 `case_id` 的重复执行的正整数。
 
-- `case_id`：`{sku}-{backend}-{workload}-{mode}-{phase}-ep{ep}-{routing}-{precision}`，
-  每个 factor 都经过 slug normalization；以及
-- `attempt_ordinal`：用于区分同一 `case_id` 重复执行的正整数。
+后端源代码的固定版本位于 `runtime/common.sh` 中，并通过精确比较获取到的提交来强制执行，同时
+还会检查已加载的 DeepEP V2 构建是否具备所需的 `ElasticBuffer` API。
 
-Backend source pin 位于 `runtime/common.sh`，并通过精确的 fetched-commit 比较强制执行；
-loaded DeepEP V2 build 还会检查必需的 `ElasticBuffer` API。
-
-这些 ID 允许消费者对匹配配置分组并区分不同配置。Benchmark 本身不计算 cohort、
-controlled comparison、sensitivity pair、eligibility 或 recommendation，均由 reader
-决定。
+这些 ID 使使用者能够对匹配的配置进行分组，并将不同的配置区分开来。后端本身
+并不计算队列、受控比较、敏感性配对、资格条件或
+建议。读取方决定要呈现哪些用例以及如何比较它们。
 
 ## 执行隔离
 
-每个非 MNNVL scale-out 用例都使用 operator 固定的 socket 和 RDMA selector。Launcher
-拒绝缺失或不完整的 profile，然后在 backend 初始化前，探测每个 allocated node 上的
-configured interface、active HCA port 和 configured GID。它不会替换为 default route、
-继承的 runner environment 或 transport fallback。Scale-up 和 MNNVL 用例会清除这些
-profile；scale-out CUDA path 强制 `NCCL_NET=IB`，HIP path 让 RCCL 自行选择 plugin，
-两者都使用 exact HCA matching。Scale-out 还设置 `NCCL_IB_MERGE_NICS=0`，避免
-dual-port NIC fusion 禁用 DeepEP V2 EP16 hybrid path 所需的 NCCL GIN；
-`rail_isolated` fabric 还会设置 `NCCL_CROSS_NIC=0`。Selector 来自 tracked platform
-registry，可被 operator config 覆盖，并只出现在 mode-0600 private log 中。
+每个非 MNNVL 横向扩展用例都使用由操作方固定的套接字和 RDMA 选择器。启动器会拒绝
+缺失或不完整的配置文件，然后在后端初始化之前探测每个已分配节点上配置的接口、活动的
+HCA 端口和配置的 GID。它绝不会改用默认路由，
+继承的运行器环境或传输回退。纵向扩展和 MNNVL 场景会清除该配置。
+横向扩展场景下，NVIDIA 强制设置 `NCCL_NET=IB`，而 AMD 将插件选择交由 RCCL。两者都采用精确 HCA
+匹配。横向扩展还固定设置 `NCCL_IB_MERGE_NICS=0`，使双端口 NIC 融合无法禁用 NCCL GIN
+（DeepEP V2 EP16 混合路径需要 NCCL GIN），而轨道隔离型网络结构（`rail_isolated`）会添加
+`NCCL_CROSS_NIC=0`。选择器来自受跟踪的平台注册表，并可选择性地由
+操作员配置覆盖，且仅出现在权限模式为 0600 的私有日志中。
 
-Repository staging 使用 checkout 和 workflow workspace 之外、预先存在、由 runner
-拥有且不可由 group/world 写入的 shared base。Parent process 在复制前解析精确 execution
-child；backend preparation 随后从该 tree 在所有 allocated node 上运行。Cleanup 等待
-allocation teardown 确认后，只删除该 child。DeepEP V2 source 在 allocation 前从固定
-revision 获取，初始化固定的 `fmt` submodule，并应用所需 local patch。
+仓库暂存使用一个预先存在、归运行器所有且组用户和其他用户均不可写的共享基目录，该目录位于
+检出目录和工作流工作区之外。父进程会先解析出确切的执行子目录，然后再
+进行复制。随后，后端准备工作会在每个已分配节点上从该目录树运行。清理操作会等待
+分配撤销得到确认，并且仅移除该子目录。DeepEP V2 源代码在分配前以
+精确锁定的修订版本获取，初始化其锁定版本的 `fmt` 子模块，并应用所需的本地补丁。
 
-H200、B200 和 B300 在 operating-system account home 对 compute-visible 时，可从该
-位置派生 private base。H100 则从 shared container directory 的 sibling 派生，绝不放在
-image storage 下。Canonical B300 execution 忽略旧版 operator `stage_dir`，始终从已验证的
-shared account home 派生 base；其 UID-mapped Actions shell 只在 owner 与 private parent
-owner 匹配时接受该精确 base。Execution-ID suffix 隔离并行 B300 worker。当前 NFS export
-可能将新建 base 实现为 UID 0；只接受该创建路径，预先存在的 root-owned base 会被拒绝。
-Canonical GB300 execution 同样忽略旧版 group-writable `stage_dir`，并在已验证的
-compute-visible account home 下派生 execution-specific private base。
+H200、B200 和 B300 可在经过验证的操作系统账户主目录下派生该私有基目录
+（前提是该主目录对计算节点可见）。H100 则派生其共享容器目录的同级目录，而绝不会派生
+镜像存储的子目录。
+规范 B300 执行会忽略操作员配置中的旧版 `stage_dir` 字段，并使该基目录始终派生自
+经过验证的共享账户主目录。其采用 UID 映射的 Actions shell 可在
+该基目录的所有者与私有父目录的所有者匹配时接受它。显式指定的暂存目录及所有其他运行器仍遵循严格的
+有效 UID 所有权规则。执行 ID 后缀可隔离并行的 B300 工作进程。当前
+NFS 导出可能会使新创建的基目录呈现为
+UID 0。仅接受这种创建路径，而预先存在且归 root 所有的基目录会被拒绝。
+规范 GB300 执行同样会忽略其旧版、组可写的 `stage_dir`，并派生一个
+位于经过验证且对计算节点可见的账户主目录下、特定于执行的私有基目录。
 
-## Image 固定与 build 隔离
+## 镜像锁定与构建隔离
 
-Enroot 将配置的 image tag 导入按 image tag 与 image platform 分键的 per-run-scoped
-squash，因此不会跨 run 复用导入的 filesystem。Image 内置 DeepEP 也会检查精确 package
-version 与预期 API。Source-built DeepEP V2 使用单独的 mode-0700 cluster-local cache，
-且仅 mount 为 `/cx-cache`。其路径绑定 CPU/GPU architecture、image 和 upstream commit。
-Cache 不是产物；per-execution source/result stage 保持隔离且可销毁，runtime probe 在
-复用前 fail closed。Runner UID 位于可信 cluster boundary 内：该 cache 防止 stale 或
-意外修改，而不是防御恶意 same-UID job。只有尚未发布的 partial build 可以自动 reset；
-integrity 或 runtime check 失败的 cache 会保留并被拒绝，避免并发 allocation 丢失正在
-使用的文件。
+Enroot 会将配置的容器标签导入一个按单次运行限定作用域、以镜像标签和
+镜像平台为键的 squash，因此一次运行绝不会复用另一次运行导入的文件系统。镜像提供的 DeepEP
+还会对照确切的软件包版本及其预期 API 进行检查。从源代码构建的 DeepEP V2 使用
+一个单独的 mode-0700 集群本地缓存，仅挂载为 `/cx-cache`。其路径绑定 CPU/GPU
+架构、镜像和上游提交。该缓存绝不会成为产物。每次执行的
+源/结果阶段仍相互隔离且可随时丢弃，运行时探测在复用前采用失败关闭策略。运行器 UID 位于
+受信任的集群边界内：此缓存用于防范陈旧内容或意外变更，而非
+具有相同 UID 的恶意作业。只有未发布的部分构建可以自动重置。未通过
+完整性或运行时检查的缓存会保持原样并被拒绝，以免并发分配丢失
+其正在使用的文件。
 
 ## 中立产物交付
 
-不存在 result server、attached store 或 managed object store。每个 shard 运行一次
-allocation，生成 per-case result JSON 与小型机械 summary，并使用 `always()` 上传 GitHub
-artifact，使红色或部分完成的 run 仍能保留结果。用例是否成功完全由自身返回码决定；上传前
-不存在 completeness 或 privacy validation，failed 或 unsupported cell 不生成 synthetic
-record。
+不存在结果服务器、附加存储或托管对象存储。每个分片运行一个分配任务，
+输出每个用例的结果 JSON 和一份简短的机械式摘要，将它们作为 GitHub 产物上传，并使用
+`always()`，因此即使某次运行标红或仅部分完成，也仍会上传。用例依据基准测试自身的
+返回码判定成功。上传前不执行完备性或隐私验证，失败或
+不受支持的单元格不会生成合成记录。
 
-任何步骤都不会晋级 run、构建 dataset 或推进 channel；artifact 就是输出。所有下游展示和
-比较都由消费者负责。
+没有任何步骤会提升某次运行、构建数据集或推进通道。产物就是输出。任何
+下游展示或比较均由使用者负责。
 
 ## 旧版数据
 
-历史 numeric schema 3-5 不属于本 benchmark 的 artifact。它们仍是历史诊断证据，但当前
-sweep 不生成或消费这些 schema。
+历史数值模式 3-5 不在该基准测试的产物范围内。它们仍是历史
+诊断证据，当前扫描既不生成也不使用它们。

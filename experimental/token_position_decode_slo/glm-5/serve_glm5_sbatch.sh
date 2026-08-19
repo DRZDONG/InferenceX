@@ -2,10 +2,10 @@
 #SBATCH -p main
 #SBATCH --gres=gpu:8
 #SBATCH --container-image=vllm/vllm-openai:nightly
-#SBATCH --container-mounts=/home/user/inferperf/glm-5:/workspace
+#SBATCH --container-mounts=/home/kimbo/inferperf/glm-5:/workspace
 #SBATCH --no-container-entrypoint
 #SBATCH --job-name=vllm-glm5
-#SBATCH --output=/home/user/inferperf/glm-5/logs/vllm-server-tp8.log
+#SBATCH --output=/home/kimbo/inferperf/glm-5/logs/vllm-server-tp8.log
 
 # Persistent vLLM server for GLM-5 FP8
 set -euo pipefail

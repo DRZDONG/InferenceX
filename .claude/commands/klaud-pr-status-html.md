@@ -2,16 +2,16 @@
 description: Render an HTML dashboard of Claude/Klaud-Cold PR states (state + check breakdown per PR) and open it in the browser
 ---
 
-Render an HTML dashboard for every open PR in `SemiAnalysisAI/InferenceX-Private-TPU` that was opened by Claude (either a `claude/*` branch OR a title containing `[Klaud Cold]`). Each row shows the PR's current state, a check-status breakdown, the title, and empty "Reason"/"Suggested fix" cells you can fill in afterward by reading failed-run logs.
+Render an HTML dashboard for every open PR in `SemiAnalysisAI/InferenceX` that was opened by Claude (either a `claude/*` branch OR a title containing `[Klaud Cold]`). Each row shows the PR's current state, a check-status breakdown, the title, and empty "Reason"/"Suggested fix" cells you can fill in afterward by reading failed-run logs.
 
 The dashboard lives at `/tmp/klaud_pr_status.html` and is opened with `open` (macOS) at the end.
 
 ## Step 1 — list candidate PRs (`claude/*` OR title containing `[Klaud Cold]`)
 
-The title check uses `contains` (not `startswith`) so it picks up PRs whose titles embed `[Klaud Cold]` after a prefix like `[Handoff to @Oseltamivir Claude /loop]` — handoff-style PRs from a /loop run still belong on the dashboard.
+The title check uses `contains` (not `startswith`) so it picks up PRs whose titles embed `[Klaud Cold]` after a prefix like `[Handoff to @Oseltamivir Claude /loop]`. Handoff-style PRs from a /loop run still belong on the dashboard.
 
 ```bash
-gh pr list --repo SemiAnalysisAI/InferenceX-Private-TPU --state open --limit 200 \
+gh pr list --repo SemiAnalysisAI/InferenceX --state open --limit 200 \
   --json number,title,headRefName,createdAt \
   --jq '.[] | select((.headRefName | startswith("claude/")) or (.title | contains("[Klaud Cold]"))) | "\(.number)\t\(.headRefName)\t\(.createdAt)\t\(.title)"' \
   > /tmp/klaud_pr_candidates.tsv
@@ -22,21 +22,21 @@ wc -l /tmp/klaud_pr_candidates.tsv
 
 `gh pr list --json statusCheckRollup` truncates rollups, so enumerate candidates first then re-query each PR individually.
 
-Each check's effective state is `if (.conclusion // "") != "" then .conclusion else .status end` — `gh` returns `conclusion: ""` (not `null`) for in-flight checks, so jq's `//` does not fall through to `.status`.
+Each check's effective state is `if (.conclusion // "") != "" then .conclusion else .status end`. `gh` returns `conclusion: ""` (not `null`) for in-flight checks, so jq's `//` does not fall through to `.status`.
 
 State buckets:
-- **FAILED** — at least one check is `FAILURE` / `CANCELLED` / `TIMED_OUT`, AND no checks are still pending.
-- **FAILED+RUNNING** — at least one failed check AND at least one pending check (sweep partially failed; some matrix jobs still running).
-- **RUNNING** — no failed checks; at least one is `QUEUED` / `IN_PROGRESS` / `PENDING`.
-- **READY** — no failed, no pending, and at least one `Run Sweep` check is `SUCCESS`.
-- **NO_SUCCESS** — sweep ran but never produced a `SUCCESS` (e.g. all matrix jobs got SKIPPED).
-- **NO_SWEEP** — no `Run Sweep` check exists for this head SHA at all (sweep never triggered — usually missing a sweep label such as `full-sweep-enabled` or `non-canary-full-sweep-enabled`).
+- **FAILED.** At least one check is `FAILURE` / `CANCELLED` / `TIMED_OUT`, and no checks are still pending.
+- **FAILED+RUNNING.** At least one check has failed and at least one is pending (the sweep partially failed while some matrix jobs are still running).
+- **RUNNING.** No checks have failed. At least one is `QUEUED` / `IN_PROGRESS` / `PENDING`.
+- **READY.** No checks have failed or remain pending, and at least one `Run Sweep` check is `SUCCESS`.
+- **NO_SUCCESS.** The sweep ran but never produced a `SUCCESS` (e.g. all matrix jobs got SKIPPED).
+- **NO_SWEEP.** No `Run Sweep` check exists for this head SHA at all. This usually means the sweep never triggered because the PR is missing a label such as `full-sweep-enabled` or `non-canary-full-sweep-enabled`.
 
 ```bash
 : > /tmp/klaud_pr_status.tsv
 : > /tmp/klaud_pr_jobs.tsv   # per-job (pr, pool, state) for queue-aware ETA
 while IFS=$'\t' read -r pr branch created title; do
-  rollup=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX-Private-TPU --json statusCheckRollup,headRefOid)
+  rollup=$(gh pr view "$pr" --repo SemiAnalysisAI/InferenceX --json statusCheckRollup,headRefOid)
   classification=$(printf '%s' "$rollup" | jq -r '
     def state: if (.conclusion // "") != "" then .conclusion else .status end;
     . as $p
@@ -75,7 +75,7 @@ done < /tmp/klaud_pr_candidates.tsv
 
 State render order (action items first): `FAILED` → `FAILED+RUNNING` → `NO_SWEEP` → `NO_SUCCESS` → `RUNNING` → `READY`. Within each bucket, descending PR number.
 
-If you have per-PR diagnoses to inject (e.g. after running `/fix-klaud-cron-prs`), write them as a JSON map `{ "1461": {"reason": "...", "fix": "..."}, ... }` to `/tmp/klaud_pr_diag.json` BEFORE running this step — the generator will pick them up. HTML may contain inline `<code>` tags.
+If you have per-PR diagnoses to inject (e.g. after running `/fix-klaud-cron-prs`), write them as a JSON map `{ "1461": {"reason": "...", "fix": "..."}, ... }` to `/tmp/klaud_pr_diag.json` BEFORE running this step. The generator will pick them up. HTML may contain inline `<code>` tags.
 
 ```bash
 cat > /tmp/gen_klaud_pr_status_html.py <<'PYEOF'
@@ -111,7 +111,7 @@ state_class = {
 # Active self-hosted runner counts per pool (from GHA registrations as of the
 # session this was last touched). If a pool isn't listed, falls back to 4 — a
 # conservative guess. To refresh:
-#   gh api --paginate repos/SemiAnalysisAI/InferenceX-Private-TPU/actions/runners \
+#   gh api --paginate repos/SemiAnalysisAI/InferenceX/actions/runners \
 #     --jq '.runners[] | select(.status == "online") | .labels[].name' \
 #     | grep -xE 'b200|b300|h200|h100|mi300x|mi325x|mi355x' | sort | uniq -c
 POOL_RUNNERS = {"b200": 12, "b300": 18, "h100": 19, "h200": 18,
@@ -242,7 +242,7 @@ if almost_ready:
             f'<li>'
             f'<span class="pen">pending={total} (q={q} ip={ip}; pools={pool_str or "?"})</span> '
             f'<span class="eta">ETA {eta or "—"}</span> '
-            f'<a href="https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/{pr}" target="_blank">#{pr}</a> &mdash; {html.escape(title)}'
+            f'<a href="https://github.com/SemiAnalysisAI/InferenceX/pull/{pr}" target="_blank">#{pr}</a> &mdash; {html.escape(title)}'
             f'</li>'
         )
     out.append('</ul></div>')
@@ -255,7 +255,7 @@ out.append('<table><thead><tr>'
 for _, _, pr, state, breakdown, title, reason, fix, eta in rows:
     cls = state_class.get(state, "state-RUNNING")
     out.append(
-        f'<tr><td class="pr"><a href="https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/{pr}" target="_blank">#{pr}</a></td>'
+        f'<tr><td class="pr"><a href="https://github.com/SemiAnalysisAI/InferenceX/pull/{pr}" target="_blank">#{pr}</a></td>'
         f'<td class="{cls}">{state}</td>'
         f'<td class="breakdown">{html.escape(breakdown)}</td>'
         f'<td class="eta">{eta or "&mdash;"}</td>'
@@ -272,7 +272,7 @@ python3 /tmp/gen_klaud_pr_status_html.py
 open /tmp/klaud_pr_status.html 2>/dev/null || true
 ```
 
-Output the path (`/tmp/klaud_pr_status.html`) and the per-state counts to the user. The command is informational only — it does **not** modify any PR.
+Output the path (`/tmp/klaud_pr_status.html`) and the per-state counts to the user. The command is informational only. It does **not** modify any PR.
 
 ### Adding diagnoses to the dashboard
 

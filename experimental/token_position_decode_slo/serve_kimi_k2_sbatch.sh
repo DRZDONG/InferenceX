@@ -2,10 +2,10 @@
 #SBATCH -p main
 #SBATCH --gres=gpu:8
 #SBATCH --container-image=vllm/vllm-openai:nightly-8711b216766bb5d3cbe15161061c3a7d9fffe59c
-#SBATCH --container-mounts=/home/user/inferperf_kimi-k2/model_weights:/model_weights,/home/user/inferperf_kimi-k2:/workspace,/home/user/inferperf_kimi-k2/results:/results,/home/user/inferperf_kimi-k2/logs:/logs
+#SBATCH --container-mounts=/home/kimbo/inferperf_kimi-k2/model_weights:/model_weights,/home/kimbo/inferperf_kimi-k2:/workspace,/home/kimbo/inferperf_kimi-k2/results:/results,/home/kimbo/inferperf_kimi-k2/logs:/logs
 #SBATCH --no-container-entrypoint
 #SBATCH --job-name=server-kimi-k2
-#SBATCH --output=/home/user/inferperf_kimi-k2/logs/vllm-server.log
+#SBATCH --output=/home/kimbo/inferperf_kimi-k2/logs/vllm-server.log
 #SBATCH --mem=256G
 
 # Persistent vLLM server for Kimi K2 Thinking

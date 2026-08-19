@@ -12,12 +12,12 @@
 #   4. Wait for the PR checks, then squash-merge the PR to main (--admin).
 #
 # Usage: utils/merge_with_reuse.sh <pr-number>
-# Env:   REPO (default SemiAnalysisAI/InferenceX-Private-TPU)
+# Env:   REPO (default SemiAnalysisAI/InferenceX)
 #        CHECK_TIMEOUT_SECONDS (default 900)
 
 set -euo pipefail
 
-REPO="${REPO:-SemiAnalysisAI/InferenceX-Private-TPU}"
+REPO="${REPO:-SemiAnalysisAI/InferenceX}"
 CHANGELOG="perf-changelog.yaml"
 CHECK_TIMEOUT_SECONDS="${CHECK_TIMEOUT_SECONDS:-900}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

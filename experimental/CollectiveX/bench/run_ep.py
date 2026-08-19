@@ -36,11 +36,12 @@ def _loaded_collective_version() -> str | None:
         return None
 
 
-def _runtime_info(torch, *, vendor: str, runtime_kind: str) -> dict:
+def _runtime_info(torch, *, vendor: str) -> dict:
     """Return the runtime versions needed to compare and debug results."""
-    collective_kind = "nccl" if runtime_kind == "cuda" else "rccl"
+    runtime_kind = "cuda" if vendor == "nvidia" else "hip"
+    collective_kind = "nccl" if vendor == "nvidia" else "rccl"
     return {
-        "accelerator_runtime": getattr(torch.version, runtime_kind, None),
+        "accelerator_runtime": getattr(torch.version, runtime_kind),
         "collective_library": {"kind": collective_kind, "version": _loaded_collective_version()},
         "framework": str(torch.__version__),
         "vendor": vendor,
@@ -50,7 +51,7 @@ def _runtime_info(torch, *, vendor: str, runtime_kind: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="CollectiveX EP dispatch/combine sweep")
     ap.add_argument("--backend", required=True,
-                    choices=["deepep-v2", "mori", "uccl-ep", "nccl-ep"])
+                    choices=["deepep-v2", "mori", "uccl-ep", "nccl-ep", "flashinfer-ep"])
     ep_harness.add_common_args(ap)
     args = ap.parse_args()
 
@@ -74,19 +75,7 @@ def main() -> int:
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
-    vendor = os.environ.get("COLLX_VENDOR", "").strip().lower()
-    runtime_kind = os.environ.get("COLLX_RUNTIME", "").strip().lower()
-    detected_runtime = "hip" if torch.version.hip else "cuda"
-    if not vendor:
-        print("ERROR: COLLX_VENDOR is required", file=sys.stderr)
-        return 2
-    if runtime_kind != detected_runtime:
-        print(
-            f"ERROR: configured runtime {runtime_kind!r} does not match "
-            f"detected runtime {detected_runtime!r}",
-            file=sys.stderr,
-        )
-        return 2
+    vendor = "amd" if torch.version.hip else "nvidia"
     device_name = torch.cuda.get_device_name(device)
     args.runtime_device_product = device_name
     args.image = os.environ.get("COLLECTIVEX_IMAGE", "")
@@ -106,13 +95,15 @@ def main() -> int:
         from ep_uccl import UCCLEPBackend as Backend
     elif args.backend == "nccl-ep":
         from ep_nccl import NCCLEPBackend as Backend
+    elif args.backend == "flashinfer-ep":
+        from ep_flashinfer import FlashInferEPBackend as Backend
     else:
         from ep_deepep_v2 import DeepEPV2Backend as Backend
 
     # MoRI registers the default GPU process group with its SHMEM runtime. Keep that
     # group device-only so scale-out does not also depend on a host Gloo fabric.
     if not dist.is_initialized():
-        if args.backend in ("mori", "uccl-ep", "nccl-ep"):
+        if args.backend in ("mori", "uccl-ep", "nccl-ep", "flashinfer-ep"):
             # MoRI registers this group with its SHMEM runtime; UCCL-EP is portable across
             # NVIDIA (NCCL) and AMD (RCCL) and bootstraps its Buffer + CPU-proxy ranks from
             # it. NCCL EP forms its OWN NCCL communicator and uses this group only to broadcast
@@ -130,7 +121,7 @@ def main() -> int:
             # device_id eagerly forms it before ElasticBuffer construction.
             dist.init_process_group("nccl", device_id=device)
 
-    args.runtime = _runtime_info(torch, vendor=vendor, runtime_kind=runtime_kind)
+    args.runtime = _runtime_info(torch, vendor=vendor)
 
     # Construct + run inside a try so a backend exception (esp. a new adapter on GPU) prints its
     # FULL traceback to STDOUT — torchrun captures per-rank stdout but only summarizes stderr, so an
