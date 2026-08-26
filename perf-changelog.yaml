@@ -6224,3 +6224,8 @@
     - "Update vLLM image tag to us-central1-docker.pkg.dev/ironwood-496417/torchtpu-vllm/torchtpu-vllm-prod:nightly-20260810"
   pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/12
 
+- config-keys:
+    - qwen3.5-fp8-tpu7x-vllm
+  description:
+    - "Update vLLM image tag and new setups to us-central1-docker.pkg.dev/ironwood-496417/torchtpu-vllm/torchtpu-vllm-prod:sa-aug-26"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX-Private-TPU/pull/13
